@@ -4,10 +4,9 @@ version = "0.1.0"
 description = "Typed STT/TTS workers for Yapper"
 requires-python = ">=3.10"
 dependencies = [
-  # Heavy ML deps installed by install.sh / documented; keep list intentional.
-  # "torch",
-  # "openai-whisper",
-  # "chatterbox-tts",
+  # torch: install CUDA build separately (see requirements.txt / install.sh)
+  "numpy>=1.24",
+  # openai-whisper + chatterbox-tts: optional at import time; install via requirements.txt
 ]
 
 [project.optional-dependencies]

@@ -1,0 +1,11 @@
+# Runtime deps for yapper STT/TTS workers.
+# Install into .venv (prefer system CUDA torch when using --system-site-packages).
+#
+# torch: install the CUDA build appropriate for your driver first, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+openai-whisper>=20231117
+# chatterbox-tts provides chatterbox.mtl_tts (ResembleAI)
+# Pin loosely; match known-good env on host when possible.
+chatterbox-tts>=0.1.0
+numpy>=1.24
+soundfile>=0.12
