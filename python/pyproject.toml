@@ -1,0 +1,36 @@
+[project]
+name = "yapper-workers"
+version = "0.1.0"
+description = "Typed STT/TTS workers for Yapper"
+requires-python = ">=3.10"
+dependencies = [
+  # Heavy ML deps installed by install.sh / documented; keep list intentional.
+  # "torch",
+  # "openai-whisper",
+  # "chatterbox-tts",
+]
+
+[project.optional-dependencies]
+dev = ["mypy>=1.8", "pytest>=8.0", "ruff>=0.4"]
+
+[project.scripts]
+yapper-stt = "yapper_stt.__main__:main"
+yapper-tts = "yapper_tts.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["yapper_stt*", "yapper_tts*", "yapper_common*"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

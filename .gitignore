@@ -1,0 +1,47 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.python-version
+
+# Models & runtime data (never commit weights)
+/models/
+*.pt
+*.pth
+*.onnx
+*.gguf
+*.bin
+!assets/**/*.md
+
+# Audio / large media
+*.wav
+*.mp3
+*.flac
+*.ogg
+!assets/**/*.md
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Logs & local config experiments
+*.log
+/logs/
+.env
+.env.*
+
+# Installer local state
+.dist/
+build/
