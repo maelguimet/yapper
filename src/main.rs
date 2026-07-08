@@ -92,6 +92,17 @@ fn run_doctor() -> anyhow::Result<()> {
             .unwrap_or(false);
         println!("  {bin}: {}", if ok { "ok" } else { "MISSING" });
     }
+    let (xclip_ok, xdotool_ok) = crate::x11util::x11_tools_available();
+    println!(
+        "  x11 tools: xclip={} xdotool={} display={}",
+        if xclip_ok { "ok" } else { "MISSING" },
+        if xdotool_ok { "ok" } else { "MISSING" },
+        if crate::x11util::display_available() {
+            "yes"
+        } else {
+            "no"
+        }
+    );
 
     let stt_mod = std::path::Path::new(&cfg.paths.python_root).join("yapper_stt");
     let tts_mod = std::path::Path::new(&cfg.paths.python_root).join("yapper_tts");
