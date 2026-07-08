@@ -236,7 +236,9 @@ impl YapperApp {
                 if path.is_file() && path.metadata().map(|m| m.len() > 1000).unwrap_or(false) {
                     self.do_transcribe_file(path.clone());
                     if !self.transcript.is_empty() {
-                        if let Err(e) = x11util::paste_at_cursor(&self.transcript) {
+                        if let Err(e) =
+                            x11util::insert_transcript_at_cursor(&self.transcript, true)
+                        {
                             self.status = format!("transcribed; paste failed: {e}");
                         } else {
                             self.status = "inserted transcript".into();
