@@ -162,6 +162,32 @@ HF weights live under `~/.cache/huggingface/hub/models--ResembleAI--chatterbox` 
 
 ---
 
+## Agent / test discipline (mandatory)
+
+**Always use a hard timeout when running anything that can hang.** Never wait unbounded on tests, workers, GUI, model load, or smokes.
+
+| Kind | Default max | How |
+|------|-------------|-----|
+| Unit tests (CPU) | **60s** total | `timeout 60s cargo test …` / `timeout 60s pytest …` |
+| X11 helper tests | **30s** | Prefer **Xvfb** isolation; never paste into the user’s live session |
+| STT GPU smoke (small) | **180s** | `timeout 180s …` or `subprocess.run(..., timeout=180)` |
+| STT GPU smoke (medium) | **300s** | same |
+| TTS GPU smoke | **300s** | same |
+| GUI launch smoke | **10s** | `timeout 10s yapper` / `timeout 10s cargo run -- gui` |
+| Install dry-run | **120s** | `timeout 120s env YAPPER_DRY_RUN=1 ./install.sh` |
+| Full install / model download | **900s** | still wrap with `timeout`; kill + log if exceeded |
+
+Rules:
+
+1. Shell: wrap with `timeout <N>s <cmd>` (GNU coreutils). On timeout, treat as failure, capture what you have, fix or report — do not spin.
+2. Python: every `subprocess.run` / worker pipe must pass `timeout=…` (seconds).
+3. Rust tests that talk to X11, spawn processes, or wait on channels must bound waits (`Duration` + kill child); no infinite `recv` without a test-level deadline.
+4. Prefer **Xvfb** for paste/xdotool tests so focus-steal cannot hang waiting on the user’s terminal.
+5. Do not pipeline long smokes into `tail` without timeouts (can look “stuck”); write logs with `tee` and bound the whole pipeline: `timeout 300s bash -c '… | tee log'`.
+6. If a command hits the timeout twice after a fix attempt, stop and record a blocker — do not re-run open-ended.
+
+---
+
 ## Machine facts (dev host)
 
 - Pop!_OS, GNOME, **X11** (`DISPLAY=:1`)
