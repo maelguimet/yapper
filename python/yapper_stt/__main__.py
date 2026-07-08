@@ -1,14 +1,23 @@
-"""STT worker entrypoint — JSON-lines on stdin/stdout. Stub until Phase 1."""
+"""STT worker entrypoint — JSON-lines on stdin/stdout."""
 
 from __future__ import annotations
 
+import logging
 import sys
 from typing import NoReturn
 
 from yapper_common.ipc import Response, dumps_response, loads_request
+from yapper_stt.worker import SttWorker
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [yapper-stt] %(levelname)s %(message)s",
+    stream=sys.stderr,
+)
 
 
 def main() -> NoReturn:
+    worker = SttWorker()
     for raw in sys.stdin:
         line = raw.strip()
         if not line:
@@ -22,23 +31,12 @@ def main() -> NoReturn:
             sys.stdout.flush()
             continue
 
-        if req.cmd == "ping":
-            resp = Response.success(
-                req.id, {"role": "stt", "version": "0.1.0", "stub": True}
-            )
-        elif req.cmd == "shutdown":
-            sys.stdout.write(dumps_response(Response.success(req.id)) + "\n")
-            sys.stdout.flush()
-            raise SystemExit(0)
-        else:
-            resp = Response.failure(
-                req.id,
-                "internal",
-                f"stub worker: command {req.cmd!r} not implemented yet",
-            )
-
+        resp = worker.handle(req)
         sys.stdout.write(dumps_response(resp) + "\n")
         sys.stdout.flush()
+
+        if req.cmd == "shutdown" and resp.ok:
+            raise SystemExit(0)
 
     raise SystemExit(0)
 
