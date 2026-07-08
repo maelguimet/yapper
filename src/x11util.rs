@@ -109,10 +109,11 @@ pub fn insert_transcript_at_cursor(text: &str, also_keep_clipboard: bool) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::process::{Child, Stdio as ProcStdio};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command as StdCommand, Stdio as ProcStdio};
     use std::sync::{Mutex, OnceLock};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// Serialize X11 tests (selection is a global resource per display).
     fn x11_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -129,60 +130,268 @@ mod tests {
         PathBuf::from("/tmp/grok-goal-29cc0bace209/implementer")
     }
 
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
     fn tools_ok() -> bool {
         let (xclip, xdotool) = x11_tools_available();
         xclip && xdotool
     }
 
-    /// Isolated Xvfb so paste/xdotool never hits the user's real session.
+    fn which_bin(name: &str) -> bool {
+        StdCommand::new("which")
+            .arg(name)
+            .stdout(ProcStdio::null())
+            .stderr(ProcStdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Openbox from extracted deb under scratch (no root install).
+    fn openbox_bin() -> Option<PathBuf> {
+        if let Ok(p) = std::env::var("YAPPER_OPENBOX") {
+            let pb = PathBuf::from(p);
+            if pb.is_file() {
+                return Some(pb);
+            }
+        }
+        let candidate = scratch_dir().join("debroot/usr/bin/openbox");
+        if candidate.is_file() {
+            Some(candidate)
+        } else {
+            None
+        }
+    }
+
+    fn openbox_lib_dir() -> Option<PathBuf> {
+        let d = scratch_dir().join("debroot/usr/lib/x86_64-linux-gnu");
+        if d.is_dir() {
+            Some(d)
+        } else {
+            None
+        }
+    }
+
+    /// Isolated Xvfb + optional openbox so paste never hits the user session.
     struct IsolatedX {
+        /// Xvfb display name (e.g. `:97`) kept for diagnostics/logs.
+        #[allow(dead_code)]
         display: String,
-        child: Child,
+        xvfb: Child,
+        wm: Option<Child>,
         prev_display: Option<String>,
+        prev_ld: Option<String>,
+        prev_home: Option<String>,
     }
 
     impl IsolatedX {
         fn start() -> Option<Self> {
-            let has_xvfb = Command::new("which")
-                .arg("Xvfb")
-                .stdout(ProcStdio::null())
-                .stderr(ProcStdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !has_xvfb || !tools_ok() {
+            if !which_bin("Xvfb") || !tools_ok() {
                 return None;
             }
-            // Pick a high display number unlikely to collide
-            let n = 90 + (std::process::id() % 20);
-            let display = format!(":{n}");
-            let child = Command::new("Xvfb")
-                .args([&display, "-screen", "0", "1280x720x24", "-nolisten", "tcp"])
-                .stdout(ProcStdio::null())
-                .stderr(ProcStdio::null())
-                .spawn()
-                .ok()?;
-            std::thread::sleep(Duration::from_millis(250));
+            // Pick a free display (avoid collisions with leftover Xvfb).
+            let mut xvfb = None;
+            let mut display = String::new();
+            for n in 110..160 {
+                let d = format!(":{n}");
+                let sock = format!("/tmp/.X11-unix/X{n}");
+                if Path::new(&sock).exists() {
+                    continue;
+                }
+                match StdCommand::new("Xvfb")
+                    .args([&d, "-screen", "0", "1280x720x24", "-nolisten", "tcp"])
+                    .stdout(ProcStdio::null())
+                    .stderr(ProcStdio::null())
+                    .spawn()
+                {
+                    Ok(child) => {
+                        display = d;
+                        xvfb = Some(child);
+                        break;
+                    }
+                    Err(_) => continue,
+                }
+            }
+            let xvfb = xvfb?;
+            std::thread::sleep(Duration::from_millis(350));
             let prev_display = std::env::var("DISPLAY").ok();
-            // SAFETY: tests are single-threaded for X11 via mutex; only this process reads env.
+            let prev_ld = std::env::var("LD_LIBRARY_PATH").ok();
+            let prev_home = std::env::var("HOME").ok();
             std::env::set_var("DISPLAY", &display);
+
+            // Start openbox when available (EWMH for xdotool windowactivate).
+            let mut wm = None;
+            if let Some(ob) = openbox_bin() {
+                if let Some(lib) = openbox_lib_dir() {
+                    let mut ld = lib.display().to_string();
+                    if let Some(ref prev) = prev_ld {
+                        ld = format!("{ld}:{prev}");
+                    }
+                    std::env::set_var("LD_LIBRARY_PATH", &ld);
+                    // themes
+                    let themes = scratch_dir().join("debroot/usr/share/themes");
+                    if themes.is_dir() {
+                        let home = scratch_dir().join("obhome");
+                        let _ = fs::create_dir_all(home.join(".themes"));
+                        let _ = fs::create_dir_all(home.join(".config/openbox"));
+                        // best-effort copy themes once
+                        let _ = StdCommand::new("cp")
+                            .args(["-a"])
+                            .arg(format!("{}/.", themes.display()))
+                            .arg(home.join(".themes"))
+                            .status();
+                        let rc = home.join(".config/openbox/rc.xml");
+                        if !rc.is_file() {
+                            let _ = fs::write(
+                                &rc,
+                                r#"<?xml version="1.0"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <theme><name>Clearlooks</name></theme>
+</openbox_config>
+"#,
+                            );
+                        }
+                        std::env::set_var("HOME", home.display().to_string());
+                    }
+                }
+                if let Ok(child) = StdCommand::new(&ob)
+                    .stdout(ProcStdio::null())
+                    .stderr(ProcStdio::null())
+                    .spawn()
+                {
+                    wm = Some(child);
+                    std::thread::sleep(Duration::from_millis(400));
+                }
+            }
+
             Some(Self {
                 display,
-                child,
+                xvfb,
+                wm,
                 prev_display,
+                prev_ld,
+                prev_home,
             })
         }
     }
 
     impl Drop for IsolatedX {
         fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            if let Some(ref mut w) = self.wm {
+                let _ = w.kill();
+                let _ = w.wait();
+            }
+            let _ = self.xvfb.kill();
+            let _ = self.xvfb.wait();
             match &self.prev_display {
                 Some(d) => std::env::set_var("DISPLAY", d),
                 None => std::env::remove_var("DISPLAY"),
             }
+            match &self.prev_ld {
+                Some(d) => std::env::set_var("LD_LIBRARY_PATH", d),
+                None => std::env::remove_var("LD_LIBRARY_PATH"),
+            }
+            match &self.prev_home {
+                Some(d) => std::env::set_var("HOME", d),
+                None => {}
+            }
         }
+    }
+
+    /// Spawn Tk sink, paste via shipped `paste_fn`, assert OUT contains marker.
+    /// Writes evidence to `proof_name` under scratch (unique per path to avoid races).
+    fn assert_injected_via_sink(
+        marker: &str,
+        proof_name: &str,
+        paste_fn: impl FnOnce(&str) -> Result<()>,
+    ) {
+        let sink_py = repo_root().join("scripts/x11_paste_sink.py");
+        assert!(
+            sink_py.is_file(),
+            "missing paste sink script {}",
+            sink_py.display()
+        );
+        let out = scratch_dir().join(format!("paste-inject-{}.txt", std::process::id()));
+        let _ = fs::remove_file(&out);
+        let _ = fs::create_dir_all(scratch_dir());
+
+        let mut sink = StdCommand::new("python3")
+            .arg(&sink_py)
+            .arg(&out)
+            .stdout(ProcStdio::null())
+            .stderr(ProcStdio::null())
+            .spawn()
+            .expect("spawn x11_paste_sink.py");
+
+        // Wait until sink file exists (widget up)
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < ready_deadline {
+            if out.is_file() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(out.is_file(), "sink never created {}", out.display());
+
+        // Focus sink window (openbox provides EWMH when available)
+        let _ = StdCommand::new("xdotool")
+            .args([
+                "search",
+                "--sync",
+                "--name",
+                "yapper-paste-sink",
+                "windowactivate",
+                "--sync",
+                "windowfocus",
+                "--sync",
+            ])
+            .status();
+        // Click into text area as belt-and-suspenders focus
+        if let Ok(outp) = StdCommand::new("xdotool")
+            .args(["search", "--name", "yapper-paste-sink"])
+            .output()
+        {
+            if let Some(wid) = String::from_utf8_lossy(&outp.stdout)
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let _ = StdCommand::new("xdotool")
+                    .args(["mousemove", "--window", wid, "80", "80", "click", "1"])
+                    .status();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(150));
+
+        paste_fn(marker).expect("paste path failed");
+
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut body = String::new();
+        while Instant::now() < deadline {
+            body = fs::read_to_string(&out).unwrap_or_default();
+            if body.contains(marker) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let _ = sink.kill();
+        let _ = sink.wait();
+
+        let proof = scratch_dir().join(proof_name);
+        let _ = fs::write(
+            &proof,
+            format!("marker={marker}\nbody={body}\nout={}\n", out.display()),
+        );
+
+        assert!(
+            body.contains(marker),
+            "expected injected text {marker:?} in {} got {body:?}",
+            out.display()
+        );
     }
 
     #[test]
@@ -227,38 +436,54 @@ mod tests {
     }
 
     #[test]
-    fn paste_at_cursor_sets_clipboard_and_xdotool_ok() {
-        let _guard = x11_lock();
-        let iso = match IsolatedX::start() {
-            Some(x) => x,
-            None => {
-                eprintln!("skip paste: no Xvfb/tools");
-                return;
-            }
-        };
-        let marker = format!("yapper-paste-{}", std::process::id());
-        // Real shipped path under isolated X — will not paste into the user session.
-        paste_at_cursor(&marker).expect("paste_at_cursor must succeed (xdotool exit 0)");
-        let clip = read_selection(ClipboardSel::Clipboard).expect("read after paste");
-        assert_eq!(clip, marker, "paste_at_cursor must leave fixture on CLIPBOARD");
-        // Prove xdotool targeted the isolated display
-        assert!(iso.display.starts_with(':'));
-    }
-
-    #[test]
-    fn insert_transcript_uses_paste_path() {
+    fn paste_at_cursor_injects_text_into_focused_sink() {
         let _guard = x11_lock();
         let _iso = match IsolatedX::start() {
             Some(x) => x,
             None => {
-                eprintln!("skip insert: no Xvfb/tools");
+                eprintln!("skip paste inject: no Xvfb/tools");
                 return;
             }
         };
-        let marker = format!("yapper-insert-{}", std::process::id());
-        insert_transcript_at_cursor(&marker, true).expect("insert_transcript_at_cursor");
-        let clip = read_selection(ClipboardSel::Clipboard).expect("clipboard after insert");
+        let marker = format!("yapper-paste-{}", std::process::id());
+        assert_injected_via_sink(&marker, "paste-inject-proof.txt", |m| paste_at_cursor(m));
+        // Also confirm clipboard left as product path does
+        let clip = read_selection(ClipboardSel::Clipboard).expect("clipboard");
         assert_eq!(clip, marker);
+    }
+
+    #[test]
+    fn insert_transcript_injects_text_into_focused_sink() {
+        let _guard = x11_lock();
+        let _iso = match IsolatedX::start() {
+            Some(x) => x,
+            None => {
+                eprintln!("skip insert inject: no Xvfb/tools");
+                return;
+            }
+        };
+        // Prefer real STT transcript from smoke when present
+        let transcript_path = scratch_dir().join("hold-to-talk-transcript.txt");
+        let from_file = fs::read_to_string(&transcript_path)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let require = std::env::var("YAPPER_REQUIRE_TRANSCRIPT").ok().as_deref() == Some("1");
+        if require {
+            assert!(
+                !from_file.is_empty(),
+                "YAPPER_REQUIRE_TRANSCRIPT=1 but {} empty/missing",
+                transcript_path.display()
+            );
+        }
+        let marker = if from_file.is_empty() {
+            format!("yapper-insert-{}", std::process::id())
+        } else {
+            from_file
+        };
+        assert_injected_via_sink(&marker, "insert-transcript-proof.txt", |m| {
+            insert_transcript_at_cursor(m, true)
+        });
     }
 
     /// Select→speak data path: PRIMARY write/read (shipped) + marker for smoke log.
@@ -276,9 +501,13 @@ mod tests {
         write_selection(ClipboardSel::Primary, &marker).expect("write primary");
         let got = read_selection(ClipboardSel::Primary).expect("read primary");
         assert_eq!(got, marker);
-        // Record evidence for ship bar
         let path = scratch_dir().join("primary-read-aloud.txt");
-        let _ = std::fs::create_dir_all(scratch_dir());
-        let _ = std::fs::write(&path, format!("primary_ok={got}\n"));
+        let _ = fs::create_dir_all(scratch_dir());
+        let _ = fs::write(&path, format!("primary_ok={got}\n"));
+    }
+
+    #[allow(dead_code)]
+    fn _path_used_for_lint(p: &Path) -> bool {
+        p.exists()
     }
 }

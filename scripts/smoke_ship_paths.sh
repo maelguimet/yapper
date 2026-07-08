@@ -132,8 +132,8 @@ print(f"select_speak_wav_ok size={out_wav.stat().st_size} frames={frames}")
 print("SELECT_SPEAK_OK")
 PY
 
-# --- Hold-to-talk STT ---
-log "--- hold-to-talk insert (transcribe fixture) ---"
+# --- Hold-to-talk: STT fixture → write transcript → insert_transcript inject (Xvfb) ---
+log "--- hold-to-talk insert (transcribe → insert_transcript_at_cursor) ---"
 run_to 180 "hold_to_talk_stt" -- "$PY" - <<'PY'
 import json, os, subprocess, sys
 from pathlib import Path
@@ -187,9 +187,33 @@ assert text, "empty transcript"
 print(f"transcript={text!r}")
 (SCRATCH / "hold-to-talk-transcript.txt").write_text(text + "\n", encoding="utf-8")
 print("HOLD_TO_TALK_STT_OK")
-print("insert_path=x11util::insert_transcript_at_cursor (Xvfb-tested)")
-print("HOLD_TO_TALK_INSERT_OK")
 PY
+
+# Drive shipped insert_transcript_at_cursor with the real transcript (Xvfb sink inject).
+log "--- insert_transcript inject (cargo, uses hold-to-talk-transcript.txt) ---"
+export LD_LIBRARY_PATH="${SCRATCH}/debroot/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export YAPPER_REQUIRE_TRANSCRIPT=1
+rm -f "$SCRATCH/insert-transcript-proof.txt"
+run_to 60 "hold_to_talk_insert_inject" -- \
+  cargo test --quiet x11util::tests::insert_transcript_injects_text_into_focused_sink -- \
+  --exact --nocapture --test-threads=1
+PROOF="$SCRATCH/insert-transcript-proof.txt"
+if [[ ! -f "$PROOF" ]]; then
+  log "FAIL: missing $PROOF after insert test"
+  exit 1
+fi
+log "insert_proof=$(tr '\n' ' ' <"$PROOF")"
+# Body must contain the STT transcript (trimmed)
+TRANSCRIPT=$(tr -d '\n' <"$SCRATCH/hold-to-talk-transcript.txt")
+if ! grep -F "body=${TRANSCRIPT}" "$PROOF" >/dev/null \
+  && ! grep -F "$TRANSCRIPT" "$PROOF" >/dev/null; then
+  log "FAIL: inject proof body does not contain STT transcript"
+  log "transcript=${TRANSCRIPT}"
+  cat "$PROOF" | tee -a "$LOG"
+  exit 1
+fi
+log "HOLD_TO_TALK_INSERT_OK"
+log "insert_path=x11util::insert_transcript_at_cursor → Xvfb sink inject with STT text"
 
 log "=== ALL SHIP PATH SMOKES OK ==="
 echo "OK" >"$SCRATCH/ship-paths.ok"
