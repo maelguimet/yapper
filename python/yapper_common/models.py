@@ -20,8 +20,10 @@ def ensure_whisper_model(size: str, download_root: Path | None = None) -> Path:
     ensure_runtime_dirs()
     root = download_root or whisper_models_dir()
     root.mkdir(parents=True, exist_ok=True)
+    # Approximate minimum sizes so partial downloads are retried.
+    min_bytes = {"small": 400_000_000, "medium": 1_200_000_000}
     target = root / f"{size}.pt"
-    if target.is_file() and target.stat().st_size > 1_000_000:
+    if target.is_file() and target.stat().st_size >= min_bytes.get(size, 1_000_000):
         return target
 
     import whisper
