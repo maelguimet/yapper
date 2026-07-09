@@ -92,9 +92,24 @@ GUI shows human-readable tone list (Neutral, Calm, Excited, …). Changing tone 
 2. Hotkey **release** → stop, write temp wav
 3. Ensure STT loaded (may unload TTS if needed)
 4. Transcribe
-5. Copy to clipboard **if** toggle enabled
-6. Paste at focused app: `xclip -selection clipboard` + `xdotool key ctrl+v` (or shift+insert)
-7. **Never** send Enter / submit
+5. Paste at focused app via CLIPBOARD + `ctrl+v` (Unicode-safe; **never** send Enter / submit)
+6. **Copy transcript** toggle controls final CLIPBOARD only:
+   - **On:** leave transcript in CLIPBOARD after paste
+   - **Off:** restore previous CLIPBOARD after paste (best-effort; empty prior → empty)
+
+Paste always **temporarily** writes the transcript to CLIPBOARD so `xdotool key ctrl+v` can inject. That is an implementation detail of the insert path, not “Copy transcript.”
+
+#### X11 clipboard restore limits (best-effort)
+
+Restoring prior CLIPBOARD after paste **cannot be hard-guaranteed** on X11:
+
+- **Races:** another client may claim CLIPBOARD between paste and restore.
+- **xclip ownership:** `xclip -i` may exit while a short-lived owner holds the selection; concurrent readers can race.
+- **Empty selection:** `xclip -o` often exits non-zero on empty; we treat that as empty and restore-to-empty.
+- **Target apps:** some apps re-write CLIPBOARD on paste/focus and overwrite our restore.
+- **No Wayland path in v1.**
+
+Product intent when Copy is off: do **not intentionally** leave the transcript in CLIPBOARD after a successful insert. Manual GUI Dictate (Record/Stop) never pastes; it only copies when the toggle is on.
 
 ## VRAM / memory policy
 

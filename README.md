@@ -148,7 +148,7 @@ echo '{"id":"1","cmd":"list_tones"}' | PYTHONPATH=python .venv/bin/python -m yap
 | Action | Default | Notes |
 |--------|---------|--------|
 | Read aloud | `Super+Shift+S` | Primary selection by default; toggle clipboard in GUI |
-| Hold-to-talk | `Super+Shift+R` | Press start / release stop → insert via clipboard+ctrl+v |
+| Hold-to-talk | `Super+Shift+R` | Press start / release stop → insert via clipboard+ctrl+v; restores prior CLIPBOARD when **Copy transcript** is off (best-effort on X11) |
 
 Rebind in **Settings → Hotkeys**: Capture a combo (or type advanced), then **Apply hotkeys**. Apply drops previous X11 grabs and registers the new ones live. Grab failures stay as a yellow banner until fixed (DE conflict or bad combo). Defaults and host examples (`Alt+Shift+S` / `Alt+Shift+Q`) parse the same way.
 

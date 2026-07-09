@@ -302,16 +302,11 @@ impl YapperApp {
                 // Take intent once so a following success cannot re-insert.
                 let intent = std::mem::replace(&mut self.recording_intent, RecordingIntent::Idle);
                 self.transcript = text.clone();
-                if self.copy_transcript {
-                    if let Err(e) = x11util::write_clipboard(&text) {
-                        self.status = format!("transcribed; clipboard failed: {e}");
-                        return;
-                    }
-                }
                 let follow = follow_up_after_transcribe(intent, &text);
                 if follow == TranscribeFollowUp::InsertAtCursor {
-                    // X11 paste path: clipboard + ctrl+v only (no Enter).
-                    match x11util::insert_transcript_at_cursor(&text, true) {
+                    // Insert owns final CLIPBOARD: paste via clipboard+ctrl+v (no Enter);
+                    // keep transcript only when Copy transcript is on (else restore prior).
+                    match x11util::insert_transcript_at_cursor(&text, self.copy_transcript) {
                         Ok(()) => {
                             self.status = status_after_transcribe_success(follow).into();
                         }
@@ -320,6 +315,13 @@ impl YapperApp {
                         }
                     }
                     return;
+                }
+                // Panel-only path (GUI Dictate / file): optional copy, never paste.
+                if self.copy_transcript {
+                    if let Err(e) = x11util::write_clipboard(&text) {
+                        self.status = format!("transcribed; clipboard failed: {e}");
+                        return;
+                    }
                 }
                 self.status = status_after_transcribe_success(follow).into();
             }
