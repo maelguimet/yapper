@@ -1,7 +1,6 @@
-//! X11 helper tests (IsolatedX / pure plan). Included as `x11util::tests` via
-//! `#[path]` so production `x11util.rs` stays under the hard line cap.
+//! Xvfb isolation harness and paste-sink helper for X11 tests.
 
-use super::*;
+use super::super::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as StdCommand, Stdio as ProcStdio};
@@ -9,21 +8,21 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Serialize X11 tests (selection is a global resource per display).
-fn x11_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(super) fn x11_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
 }
 
-fn scratch_dir() -> PathBuf {
+pub(super) fn scratch_dir() -> PathBuf {
     if let Ok(p) = std::env::var("YAPPER_SCRATCH") {
         return PathBuf::from(p);
     }
     PathBuf::from("/tmp/grok-goal-18fa6167e124/implementer")
 }
 
-fn repo_root() -> PathBuf {
+pub(super) fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
@@ -68,7 +67,7 @@ fn openbox_lib_dir() -> Option<PathBuf> {
 }
 
 /// Isolated Xvfb + optional openbox so paste never hits the user session.
-struct IsolatedX {
+pub(super) struct IsolatedX {
     xvfb: Child,
     wm: Option<Child>,
     prev_display: Option<String>,
@@ -77,7 +76,7 @@ struct IsolatedX {
 }
 
 impl IsolatedX {
-    fn start() -> Option<Self> {
+    pub(super) fn start() -> Option<Self> {
         if !which_bin("Xvfb") || !tools_ok() {
             return None;
         }
@@ -140,6 +139,7 @@ impl IsolatedX {
         let prev_display = std::env::var("DISPLAY").ok();
         let prev_ld = std::env::var("LD_LIBRARY_PATH").ok();
         let prev_home = std::env::var("HOME").ok();
+        // Isolated display for this test only; restored on Drop.
         std::env::set_var("DISPLAY", &display);
 
         // Start openbox when available (EWMH for xdotool windowactivate).
@@ -220,7 +220,7 @@ impl Drop for IsolatedX {
 
 /// Spawn Tk sink, paste via shipped `paste_fn`, assert OUT contains marker.
 /// Writes evidence to `proof_name` under scratch (unique per path to avoid races).
-fn assert_injected_via_sink(
+pub(super) fn assert_injected_via_sink(
     marker: &str,
     proof_name: &str,
     paste_fn: impl FnOnce(&str) -> Result<()>,
@@ -307,258 +307,4 @@ fn assert_injected_via_sink(
         "expected injected text {marker:?} in {} got {body:?}",
         out.display()
     );
-}
-
-#[test]
-fn clipboard_insert_plan_restore_when_copy_off() {
-    use ClipboardInsertStep::*;
-    assert_eq!(
-        clipboard_insert_plan(false),
-        &[
-            SavePriorClipboard,
-            WriteTranscriptAndPaste,
-            RestorePriorClipboard,
-        ],
-        "Copy off must plan save→paste→restore"
-    );
-}
-
-#[test]
-fn clipboard_insert_plan_keep_when_copy_on() {
-    use ClipboardInsertStep::*;
-    assert_eq!(
-        clipboard_insert_plan(true),
-        &[SavePriorClipboard, WriteTranscriptAndPaste],
-        "Copy on must plan save→paste with no restore"
-    );
-}
-
-#[test]
-fn tools_detection_does_not_panic() {
-    let _ = x11_tools_available();
-    let _ = display_available();
-    let _ = super_modifier_down();
-}
-
-#[test]
-fn super_modifier_query_when_display() {
-    // Read-only query; safe on live DISPLAY (does not steal focus/selection).
-    if !display_available() {
-        let _iso = match IsolatedX::start() {
-            Some(x) => x,
-            None => {
-                eprintln!("skip super_modifier_query: no DISPLAY/Xvfb");
-                return;
-            }
-        };
-        let down = query_super_modifier_down().expect("query Super on isolated X");
-        assert!(!down, "idle Xvfb should not report Super held");
-        return;
-    }
-    let down = query_super_modifier_down().expect("query Super/Mod4 via XQueryPointer");
-    let _ = down;
-    let _ = super_modifier_down();
-}
-
-#[test]
-fn clipboard_round_trip_when_display() {
-    let _guard = x11_lock();
-    let _iso = match IsolatedX::start() {
-        Some(x) => x,
-        None => {
-            eprintln!("skip clipboard: no Xvfb/tools");
-            return;
-        }
-    };
-    let marker = format!("yapper-clipboard-{}", std::process::id());
-    write_clipboard(&marker).expect("write_clipboard");
-    let got = read_selection(ClipboardSel::Clipboard).expect("read clipboard");
-    assert_eq!(got, marker, "CLIPBOARD round-trip via write_clipboard/read_selection");
-}
-
-#[test]
-fn primary_selection_round_trip_when_display() {
-    let _guard = x11_lock();
-    let _iso = match IsolatedX::start() {
-        Some(x) => x,
-        None => {
-            eprintln!("skip primary: no Xvfb/tools");
-            return;
-        }
-    };
-    let marker = format!("yapper-primary-{}", std::process::id());
-    write_selection(ClipboardSel::Primary, &marker).expect("write PRIMARY");
-    let got = read_selection(ClipboardSel::Primary).expect("read PRIMARY");
-    assert_eq!(
-        got, marker,
-        "PRIMARY selection must round-trip (read-aloud default source)"
-    );
-}
-
-#[test]
-fn paste_at_cursor_injects_text_into_focused_sink() {
-    let _guard = x11_lock();
-    let _iso = match IsolatedX::start() {
-        Some(x) => x,
-        None => {
-            eprintln!("skip paste inject: no Xvfb/tools");
-            return;
-        }
-    };
-    let marker = format!("yapper-paste-{}", std::process::id());
-    assert_injected_via_sink(&marker, "paste-inject-proof.txt", |m| paste_at_cursor(m));
-    // paste_at_cursor intentionally leaves text in CLIPBOARD
-    let clip = read_selection(ClipboardSel::Clipboard).expect("clipboard");
-    assert_eq!(clip, marker);
-}
-
-#[test]
-fn insert_transcript_injects_text_into_focused_sink() {
-    let _guard = x11_lock();
-    let _iso = match IsolatedX::start() {
-        Some(x) => x,
-        None => {
-            eprintln!("skip insert inject: no Xvfb/tools");
-            return;
-        }
-    };
-    let transcript_path = scratch_dir().join("hold-to-talk-transcript.txt");
-    let from_file = fs::read_to_string(&transcript_path)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let require = std::env::var("YAPPER_REQUIRE_TRANSCRIPT").ok().as_deref() == Some("1");
-    if require {
-        assert!(
-            !from_file.is_empty(),
-            "YAPPER_REQUIRE_TRANSCRIPT=1 but {} empty/missing",
-            transcript_path.display()
-        );
-    }
-    let marker = if from_file.is_empty() {
-        format!("yapper-insert-{}", std::process::id())
-    } else {
-        from_file
-    };
-    assert_injected_via_sink(&marker, "insert-transcript-proof.txt", |m| {
-        insert_transcript_at_cursor(m, true)
-    });
-}
-
-/// Copy on: after insert, CLIPBOARD holds the transcript (product "Copy transcript").
-#[test]
-fn insert_keep_clipboard_leaves_transcript() {
-    let _guard = x11_lock();
-    let _iso = match IsolatedX::start() {
-        Some(x) => x,
-        None => {
-            eprintln!("skip insert keep: no Xvfb/tools");
-            return;
-        }
-    };
-    let prior = format!("yapper-prior-keep-{}", std::process::id());
-    let transcript = format!("yapper-transcript-keep-{}", std::process::id());
-    write_clipboard(&prior).expect("seed prior CLIPBOARD");
-    assert_eq!(
-        read_selection(ClipboardSel::Clipboard).expect("read prior"),
-        prior
-    );
-
-    assert_injected_via_sink(&transcript, "clipboard-keep-inject-proof.txt", |m| {
-        insert_transcript_at_cursor(m, true)
-    });
-
-    let clip = read_selection(ClipboardSel::Clipboard).expect("clipboard after keep insert");
-    assert_eq!(
-        clip, transcript,
-        "Copy on must leave transcript in CLIPBOARD, not prior {prior:?}"
-    );
-
-    let _ = fs::create_dir_all(scratch_dir());
-    let log = scratch_dir().join("clipboard-keep.log");
-    let _ = fs::write(
-        &log,
-        format!("prior={prior}\ntranscript={transcript}\nfinal_clipboard={clip}\nkeep=true\n"),
-    );
-}
-
-/// Copy off: after insert, CLIPBOARD is restored to prior (not left as transcript).
-#[test]
-fn insert_restore_clipboard_when_copy_off() {
-    let _guard = x11_lock();
-    let _iso = match IsolatedX::start() {
-        Some(x) => x,
-        None => {
-            eprintln!("skip insert restore: no Xvfb/tools");
-            return;
-        }
-    };
-    let prior = format!("yapper-prior-restore-{}", std::process::id());
-    let transcript = format!("yapper-transcript-restore-{}", std::process::id());
-    write_clipboard(&prior).expect("seed prior CLIPBOARD");
-    assert_eq!(
-        read_selection(ClipboardSel::Clipboard).expect("read prior"),
-        prior
-    );
-
-    assert_injected_via_sink(&transcript, "clipboard-restore-inject-proof.txt", |m| {
-        insert_transcript_at_cursor(m, false)
-    });
-
-    let clip = read_selection(ClipboardSel::Clipboard).expect("clipboard after restore insert");
-    assert_eq!(
-        clip, prior,
-        "Copy off must restore prior CLIPBOARD; got transcript-like {clip:?}"
-    );
-    assert_ne!(clip, transcript, "must not leave transcript when Copy off");
-
-    let _ = fs::create_dir_all(scratch_dir());
-    let log = scratch_dir().join("clipboard-restore.log");
-    let _ = fs::write(
-        &log,
-        format!("prior={prior}\ntranscript={transcript}\nfinal_clipboard={clip}\nkeep=false\n"),
-    );
-}
-
-/// Empty prior + Copy off restores to empty (not leftover transcript).
-#[test]
-fn insert_restore_empty_prior_when_copy_off() {
-    let _guard = x11_lock();
-    let _iso = match IsolatedX::start() {
-        Some(x) => x,
-        None => {
-            eprintln!("skip insert empty restore: no Xvfb/tools");
-            return;
-        }
-    };
-    // Clear CLIPBOARD as best-effort empty prior.
-    write_clipboard("").expect("clear CLIPBOARD");
-    let transcript = format!("yapper-transcript-empty-prior-{}", std::process::id());
-    insert_transcript_at_cursor(&transcript, false).expect("insert with restore");
-    let clip = read_selection(ClipboardSel::Clipboard).expect("clipboard");
-    assert_eq!(
-        clip, "",
-        "empty prior must restore to empty; got {clip:?}"
-    );
-    assert_ne!(clip, transcript);
-}
-
-/// Select→speak data path: PRIMARY write/read (shipped) + marker for smoke log.
-#[test]
-fn primary_is_readable_for_read_aloud_source() {
-    let _guard = x11_lock();
-    let _iso = match IsolatedX::start() {
-        Some(x) => x,
-        None => {
-            eprintln!("skip primary read-aloud path: no Xvfb/tools");
-            return;
-        }
-    };
-    let marker = format!("Yapper read aloud {}", std::process::id());
-    write_selection(ClipboardSel::Primary, &marker).expect("write primary");
-    let got = read_selection(ClipboardSel::Primary).expect("read primary");
-    assert_eq!(got, marker);
-    let path = scratch_dir().join("primary-read-aloud.txt");
-    let _ = fs::create_dir_all(scratch_dir());
-    let _ = fs::write(&path, format!("primary_ok={got}\n"));
 }

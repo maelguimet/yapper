@@ -223,5 +223,5 @@ pub fn insert_transcript_at_cursor(text: &str, also_keep_clipboard: bool) -> Res
 }
 
 #[cfg(test)]
-#[path = "x11util_tests.rs"]
+#[path = "x11util_tests/mod.rs"]
 mod tests;
