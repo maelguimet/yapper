@@ -64,15 +64,17 @@ pub struct ModelsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PathsConfig {
-    /// Directory containing the repo / install (for PYTHONPATH workers)
+    /// Optional PYTHONPATH root for workers.
+    /// Empty = import from `python_bin` site-packages (user install).
+    /// Dev checkout: set to repo `python/` or use `cargo run` resolution.
     pub python_root: String,
+    /// Interpreter that has yapper workers installed (install venv or dev `.venv`).
     pub python_bin: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         let data = default_data_dir();
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         Self {
             stt: SttConfig {
                 model: "small".into(),
@@ -97,8 +99,10 @@ impl Default for Config {
                 voices_dir: data.join("voices").to_string_lossy().into(),
             },
             paths: PathsConfig {
-                python_root: home.join("projects/yapper/python").to_string_lossy().into(),
-                python_bin: "python3".into(),
+                // User install: empty root + XDG venv bin (workers in site-packages).
+                // Dev: `resolve_python_*` falls back to repo `python/` and `.venv`.
+                python_root: String::new(),
+                python_bin: data.join("venv/bin/python").to_string_lossy().into(),
             },
             audio: AudioConfig {
                 mic_source: String::new(),

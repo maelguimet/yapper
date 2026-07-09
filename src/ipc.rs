@@ -60,8 +60,13 @@ impl WorkerClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .env("PYTHONPATH", python_root)
             .env("PYTHONUNBUFFERED", "1");
+        // Empty python_root → rely on interpreter site-packages (self-contained install).
+        // Non-empty → dev checkout or a stable package tree on PYTHONPATH.
+        let root = python_root.trim();
+        if !root.is_empty() {
+            cmd.env("PYTHONPATH", root);
+        }
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawn {module} via {python_bin}"))?;

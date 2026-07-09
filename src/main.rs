@@ -9,6 +9,7 @@ mod lifecycle;
 mod mic;
 mod mpv_backend;
 mod policy;
+mod python_paths;
 mod segment;
 mod textprep;
 mod timeouts;
@@ -21,7 +22,7 @@ mod x11util;
 
 use clap::{Parser, Subcommand};
 use config::Config;
-use workers::{resolve_python_bin, resolve_python_root};
+use workers::{resolve_python_bin, resolve_python_root, worker_package_status};
 
 #[derive(Parser, Debug)]
 #[command(name = "yapper", about = "Local tray STT + TTS (Whisper + Chatterbox)")]
@@ -137,15 +138,14 @@ fn run_doctor() -> anyhow::Result<()> {
     let mut no_player: Option<std::process::Child> = None;
     let _ = crate::audio::stop_playback_if_running(&mut no_player);
 
-    let stt_mod = std::path::Path::new(&cfg.paths.python_root).join("yapper_stt");
-    let tts_mod = std::path::Path::new(&cfg.paths.python_root).join("yapper_tts");
+    // Tree under python_root and/or importable via python_bin site-packages.
     println!(
         "  yapper_stt package: {}",
-        if stt_mod.is_dir() { "ok" } else { "MISSING" }
+        worker_package_status(&cfg.paths.python_bin, &cfg.paths.python_root, "yapper_stt")
     );
     println!(
         "  yapper_tts package: {}",
-        if tts_mod.is_dir() { "ok" } else { "MISSING" }
+        worker_package_status(&cfg.paths.python_bin, &cfg.paths.python_root, "yapper_tts")
     );
 
     let small = data.join("models/whisper/small.pt");

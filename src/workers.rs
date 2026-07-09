@@ -9,6 +9,9 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+// Path resolution lives in `python_paths`; re-export for existing call sites.
+pub use crate::python_paths::{resolve_python_bin, resolve_python_root, worker_package_status};
+
 pub struct WorkerManager {
     cfg: Config,
     stt: Option<WorkerClient>,
@@ -366,47 +369,9 @@ fn is_timeout_error(err: &anyhow::Error) -> bool {
     format!("{err:#}").to_lowercase().contains("timed out")
 }
 
-/// Resolve python root relative to executable / env / config.
-pub fn resolve_python_root(cfg: &Config) -> PathBuf {
-    if let Ok(p) = std::env::var("YAPPER_PYTHON_ROOT") {
-        return PathBuf::from(p);
-    }
-    let from_cfg = PathBuf::from(&cfg.paths.python_root);
-    if from_cfg.is_dir() {
-        return from_cfg;
-    }
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
-    if manifest.is_dir() {
-        return manifest;
-    }
-    from_cfg
-}
-
-pub fn resolve_python_bin(cfg: &Config) -> String {
-    if let Ok(p) = std::env::var("YAPPER_PYTHON") {
-        return p;
-    }
-    let venv = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".venv/bin/python");
-    if venv.is_file() {
-        return venv.to_string_lossy().into();
-    }
-    cfg.paths.python_bin.clone()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_python_root_finds_repo() {
-        let cfg = Config::default();
-        let root = resolve_python_root(&cfg);
-        assert!(
-            root.join("yapper_stt").is_dir() || root.join("yapper_common").is_dir(),
-            "python root should contain packages: {}",
-            root.display()
-        );
-    }
+    use crate::timeouts;
 
     #[test]
     fn synth_timeout_bounds() {

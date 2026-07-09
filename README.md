@@ -76,7 +76,12 @@ If the tray icon is missing, `yapper doctor` reports host/lib status and the GUI
 - macOS / Windows
 - Silent success without a tray host (GUI still runs, but always-on UX is broken — doctor warns)
 
-## Install
+## Install (user — self-contained)
+
+Normal install copies the binary and **non-editable** Python workers into stable
+XDG locations. After install you may **move or delete the source checkout**; the
+app keeps working via `~/.local/share/yapper/venv` (workers in site-packages).
+Runtime config does **not** point workers at the git tree.
 
 ```bash
 git clone <repo-url> yapper
@@ -86,34 +91,52 @@ cd yapper
 # non-interactive:
 #   YAPPER_AUTOSTART=user ./install.sh
 #   YAPPER_AUTOSTART=no ./install.sh
-#   YAPPER_DRY_RUN=1 ./install.sh
+#   YAPPER_DRY_RUN=1 ./install.sh   # plan only; no mutations
 ```
 
-Installs binary to `~/.local/bin/yapper`, venv under `~/.local/share/yapper/venv`,
-voices/models under `~/.local/share/yapper/`, desktop entry for the app menu.
+| What | Where |
+|------|--------|
+| Binary | `~/.local/bin/yapper` |
+| Python venv + workers | `~/.local/share/yapper/venv` |
+| Models / voices / logs | `~/.local/share/yapper/` |
+| Config | `~/.config/yapper/config.toml` (`python_bin` = install venv; `python_root` empty) |
 
 ```bash
-yapper doctor   # host + worker ping checks
+yapper doctor   # host + worker ping checks (import from venv)
 yapper          # launch GUI + tray + hotkeys
 ```
 
-### Dev without install
+Self-contained smoke (isolated temp venv, no checkout on `PYTHONPATH`):
+
+```bash
+timeout 180s env YAPPER_SCRATCH=/tmp/yapper-smoke ./scripts/smoke_self_contained_install.sh
+```
+
+### Dev without install (editable / repo)
+
+**Dev-only.** Editable install and `[dev]` extras stay in the checkout `.venv`.
+This path is for hacking on workers; it is **not** what `./install.sh` does for
+users. Prefer `cargo run` + repo `python/` on `PYTHONPATH`.
 
 ```bash
 cd ~/projects/yapper
 python3 -m venv --system-site-packages .venv
 .venv/bin/pip install -U pip setuptools wheel
-.venv/bin/pip install -e 'python[dev]'
+.venv/bin/pip install -e 'python[dev]'   # editable + pytest/mypy/ruff — dev only
 ./scripts/install_voices.sh
 .venv/bin/python scripts/download_models.py small medium
 cargo run -- doctor
 cargo run -- gui
-.venv/bin/python -m pytest python/tests -m "not gpu"
-.venv/bin/python -m pytest python/tests -m gpu   # needs CUDA
-cargo test
+cd python && PYTHONPATH=. pytest -q -m 'not gpu'
+# optional GPU smokes:
+# cd python && PYTHONPATH=. pytest -q -m gpu
+cargo test --locked
 ```
 
-Worker smokes:
+Optional: force the installer into editable mode (still not recommended for
+daily-driver installs): `YAPPER_DEV_INSTALL=1 ./install.sh`.
+
+Worker smokes from the repo:
 
 ```bash
 echo '{"id":"1","cmd":"ping"}' | PYTHONPATH=python .venv/bin/python -m yapper_stt

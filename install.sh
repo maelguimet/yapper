@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Yapper installer — build binary, venv, voices, optional autostart.
+# Yapper installer — build binary, self-contained venv workers, voices, optional autostart.
+# After install the app does not need the source checkout (user install).
+# Dev editable install is separate — see README "Dev without install".
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,6 +11,8 @@ DATA="${XDG_DATA_HOME:-$HOME/.local/share}/yapper"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/yapper"
 VENV="$DATA/venv"
 DRY_RUN="${YAPPER_DRY_RUN:-0}"
+# Dev-only: editable + [dev] extras into the app venv (not for normal install).
+DEV_INSTALL="${YAPPER_DEV_INSTALL:-0}"
 
 log() { printf '==> %s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
@@ -37,7 +41,7 @@ check_deps() {
 build_rust() {
   log "building yapper (release)"
   if [[ "$DRY_RUN" == "1" ]]; then
-    log "[dry-run] cargo build --release"
+    log "[dry-run] cargo build --release → $BIN_DIR/yapper"
     return
   fi
   (cd "$ROOT" && cargo build --release)
@@ -47,9 +51,14 @@ build_rust() {
 }
 
 setup_python() {
-  log "Python venv at $VENV"
+  log "Python venv at $VENV (self-contained workers)"
   if [[ "$DRY_RUN" == "1" ]]; then
-    log "[dry-run] create venv + install workers"
+    if [[ "$DEV_INSTALL" == "1" ]]; then
+      log "[dry-run] create venv + pip install -e python[dev] (YAPPER_DEV_INSTALL=1)"
+    else
+      log "[dry-run] create venv + non-editable pip install python/ (no [dev])"
+      log "[dry-run] workers land in $VENV — no runtime dependency on $ROOT"
+    fi
     return
   fi
   mkdir -p "$DATA"
@@ -60,7 +69,13 @@ setup_python() {
   # shellcheck disable=SC1091
   source "$VENV/bin/activate"
   pip install -U pip setuptools wheel
-  pip install -e "$ROOT/python[dev]" || pip install -e "$ROOT/python"
+  if [[ "$DEV_INSTALL" == "1" ]]; then
+    log "dev install: editable python[dev] (requires checkout at $ROOT)"
+    pip install -e "$ROOT/python[dev]" || pip install -e "$ROOT/python"
+  else
+    # Non-editable: package copied into venv site-packages; checkout may be deleted after.
+    pip install "$ROOT/python"
+  fi
   # Best-effort ML deps (may already be system-site)
   pip install -r "$ROOT/python/requirements.txt" || warn "optional pip requirements incomplete"
   deactivate || true
@@ -69,7 +84,7 @@ setup_python() {
 install_voices() {
   log "installing Eve voice refs"
   if [[ "$DRY_RUN" == "1" ]]; then
-    log "[dry-run] scripts/install_voices.sh"
+    log "[dry-run] scripts/install_voices.sh → $DATA/voices"
     return
   fi
   YAPPER_VOICES_DIR="$DATA/voices" bash "$ROOT/scripts/install_voices.sh" || warn "voice install failed"
@@ -78,35 +93,40 @@ install_voices() {
 download_models() {
   log "ensuring Whisper small model"
   if [[ "$DRY_RUN" == "1" ]]; then
-    log "[dry-run] download small"
+    log "[dry-run] download small → $DATA/models"
     return
   fi
   local py="$VENV/bin/python"
   [[ -x "$py" ]] || py=python3
-  PYTHONPATH="$ROOT/python" "$py" "$ROOT/scripts/download_models.py" small || warn "model download failed"
+  # Package is installed into the venv; no PYTHONPATH=$ROOT needed.
+  "$py" "$ROOT/scripts/download_models.py" small || warn "model download failed"
 }
 
 write_config() {
-  log "config"
+  log "config (stable paths under $DATA / $CONFIG)"
   if [[ "$DRY_RUN" == "1" ]]; then
+    log "[dry-run] python_bin=$VENV/bin/python"
+    log "[dry-run] python_root= (empty → import from venv site-packages)"
     return
   fi
   mkdir -p "$CONFIG" "$DATA/models" "$DATA/logs"
   if [[ ! -f "$CONFIG/config.toml" ]]; then
     "$BIN_DIR/yapper" init-config || true
   fi
-  # Point python paths at install
+  # Point runtime at the install venv only — never at the source checkout.
   if [[ -f "$CONFIG/config.toml" ]]; then
-    # rewrite via a small python snippet for reliability
-    PYTHONPATH="$ROOT/python" python3 - <<PY || true
+    python3 - <<PY || true
 from pathlib import Path
 import re
 p = Path("$CONFIG/config.toml")
 text = p.read_text()
-text = re.sub(r'python_root = ".*"', 'python_root = "$ROOT/python"', text)
+# Empty python_root: workers import from python_bin's site-packages.
+text = re.sub(r'python_root = ".*"', 'python_root = ""', text)
 text = re.sub(r'python_bin = ".*"', 'python_bin = "$VENV/bin/python"', text)
 p.write_text(text)
 print("updated python paths in", p)
+print("  python_bin = $VENV/bin/python")
+print("  python_root = (empty; venv site-packages)")
 PY
   fi
 }
@@ -177,7 +197,7 @@ prompt_autostart() {
 run_doctor() {
   log "doctor"
   if [[ "$DRY_RUN" == "1" ]]; then
-    log "[dry-run] yapper doctor"
+    log "[dry-run] yapper doctor (worker pings via installed venv)"
     return
   fi
   export PATH="$BIN_DIR:$PATH"
@@ -186,6 +206,11 @@ run_doctor() {
 
 main() {
   log "Yapper install from $ROOT"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "mode: dry-run (no mutations); plan is self-contained user install"
+  else
+    log "mode: user install → binary + venv workers under XDG data (checkout optional after)"
+  fi
   check_deps
   build_rust
   setup_python
@@ -196,6 +221,7 @@ main() {
   prompt_autostart
   run_doctor
   log "done. Run: $BIN_DIR/yapper"
+  log "checkout may be moved/deleted; runtime uses $VENV only"
 }
 
 main "$@"
