@@ -6,17 +6,22 @@ use crate::audio::{
 };
 use crate::config::Config;
 use crate::hotkeys::{
-    capture_mod_state, format_capture_hotkey, format_hotkey, parse_hotkey, HotkeyAction,
+    canonicalize_hotkey_spec, capture_mod_state, format_capture_hotkey, reregister, HotkeyAction,
     HotkeyHub,
 };
+use crate::lifecycle::{
+    close_request_intent, minimize_request_intent, should_cancel_close, tray_menu_intent,
+    ExitPromptState, ShellIntent,
+};
 use crate::policy::Role;
-use crate::tray::{TrayAction, TrayHandle};
+use crate::tray::{tray_failure_hint, TrayAction, TrayHandle};
 use crate::workers::{resolve_python_bin, resolve_python_root, WorkerManager};
 use crate::x11util::{self, ClipboardSel};
 use anyhow::Result;
 use eframe::egui;
 use std::path::PathBuf;
 use std::process::Child;
+use std::time::{Duration, Instant};
 
 /// Minimum window size so controls are not born clipped (Phase 10 / B6).
 const MIN_WINDOW_WIDTH: f32 = 640.0;
@@ -169,7 +174,14 @@ pub struct YapperApp {
     hotkey_capture: Option<HotkeyCaptureField>,
     tray: Option<TrayHandle>,
     tray_error: Option<String>,
+    /// First tray create already attempted (may still retry while failed).
     tray_tried: bool,
+    /// Next tray create retry instant when first create failed.
+    tray_retry_at: Option<Instant>,
+    /// When true, window close is allowed to end the process (tray Quit / confirmed Exit).
+    hard_quit_armed: bool,
+    /// In-window Exit confirmation dialog state.
+    exit_prompt: ExitPromptState,
     /// Pulse source names for the mic dropdown (plus empty = system default).
     mic_sources: Vec<PulseSource>,
     mic_list_error: Option<String>,
@@ -237,6 +249,9 @@ impl YapperApp {
             tray: None,
             tray_error: None,
             tray_tried: false,
+            tray_retry_at: None,
+            hard_quit_armed: false,
+            exit_prompt: ExitPromptState::Idle,
             mic_sources: Vec::new(),
             mic_list_error: None,
             mic_source,
@@ -263,14 +278,7 @@ impl YapperApp {
     }
 
     fn apply_hotkeys(&mut self) {
-        let read = self.cfg.hotkeys.read_aloud.trim();
-        let ptt = self.cfg.hotkeys.push_to_talk.trim();
-        if read.is_empty() || ptt.is_empty() {
-            self.hotkey_error = Some("hotkey binding cannot be empty".into());
-            self.status = "hotkey update failed".into();
-            return;
-        }
-        let read_canon = match parse_hotkey(read).and_then(|hk| format_hotkey(&hk)) {
+        let read_canon = match canonicalize_hotkey_spec(&self.cfg.hotkeys.read_aloud) {
             Ok(s) => s,
             Err(e) => {
                 self.hotkey_error = Some(format!("read-aloud invalid: {e:#}"));
@@ -278,7 +286,7 @@ impl YapperApp {
                 return;
             }
         };
-        let ptt_canon = match parse_hotkey(ptt).and_then(|hk| format_hotkey(&hk)) {
+        let ptt_canon = match canonicalize_hotkey_spec(&self.cfg.hotkeys.push_to_talk) {
             Ok(s) => s,
             Err(e) => {
                 self.hotkey_error = Some(format!("push-to-talk invalid: {e:#}"));
@@ -289,17 +297,80 @@ impl YapperApp {
         self.cfg.hotkeys.read_aloud = read_canon;
         self.cfg.hotkeys.push_to_talk = ptt_canon;
         self.persist();
-        match HotkeyHub::register(&self.cfg.hotkeys.read_aloud, &self.cfg.hotkeys.push_to_talk) {
+        // Drop previous grabs *before* registering — double-register is the B13 bug.
+        let previous = self.hotkeys.take();
+        match reregister(
+            previous,
+            &self.cfg.hotkeys.read_aloud,
+            &self.cfg.hotkeys.push_to_talk,
+        ) {
             Ok(h) => {
                 self.hotkeys = Some(h);
                 self.hotkey_error = None;
                 self.hotkey_capture = None;
-                self.status = "hotkeys updated".into();
+                self.status = format!(
+                    "hotkeys live: {} | {}",
+                    self.cfg.hotkeys.read_aloud, self.cfg.hotkeys.push_to_talk
+                );
             }
             Err(e) => {
-                self.hotkey_error = Some(format!("hotkey grab failed: {e:#}"));
-                self.status = "hotkey update failed".into();
+                // Leave hub empty so we never claim grabs we do not hold.
+                self.hotkeys = None;
+                self.hotkey_error = Some(format!(
+                    "hotkey grab failed (DE conflict or bad combo): {e:#}. \
+                     Rebind or free the shortcut in system settings, then Apply again."
+                ));
+                self.status = "hotkey update failed — shortcuts inactive until fixed".into();
             }
+        }
+    }
+
+    fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        // Also clear minimized state so Open restores cleanly.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        self.status = "hidden to tray (right-click tray → Open / Quit)".into();
+    }
+
+    fn show_window(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.status = "window focused".into();
+    }
+
+    fn arm_hard_quit_and_close(&mut self, ctx: &egui::Context) {
+        self.hard_quit_armed = true;
+        let _ = self.workers.unload_all();
+        self.workers.shutdown_all();
+        stop_playback(&mut self.playback);
+        if let Some(session) = self.recording.take() {
+            let _ = stop_recording(session);
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Intercept title-bar close / minimize → hide; only hard_quit_armed exits.
+    fn handle_viewport_lifecycle(&mut self, ctx: &egui::Context) {
+        let (close_req, minimized) = ctx.input(|i| {
+            let vp = i.viewport();
+            (vp.close_requested(), vp.minimized.unwrap_or(false))
+        });
+
+        if close_req {
+            if should_cancel_close(self.hard_quit_armed) {
+                // Always-on product: close button hides, does not exit.
+                let _ = close_request_intent();
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.hide_to_tray(ctx);
+            }
+            // else: hard quit armed — allow process exit
+            return;
+        }
+
+        if minimized {
+            let _ = minimize_request_intent();
+            self.hide_to_tray(ctx);
         }
     }
 
@@ -595,7 +666,7 @@ impl YapperApp {
 
     fn poll_hotkeys(&mut self) {
         let events: Vec<_> = if let Some(hk) = self.hotkeys.as_ref() {
-            hk.rx.try_iter().collect()
+            hk.poll_events()
         } else {
             Vec::new()
         };
@@ -610,18 +681,29 @@ impl YapperApp {
     }
 
     fn ensure_tray(&mut self) {
-        if self.tray_tried {
+        if self.tray.is_some() {
             return;
         }
+        // Retry with backoff while create fails (SNI host / display race).
+        if let Some(at) = self.tray_retry_at {
+            if Instant::now() < at {
+                return;
+            }
+        }
         self.tray_tried = true;
-        // tray-icon/libappindicator needs a live display after eframe starts
         match TrayHandle::try_create() {
             Ok(t) => {
                 self.tray = Some(t);
                 self.tray_error = None;
+                self.tray_retry_at = None;
             }
             Err(e) => {
-                self.tray_error = Some(format!("tray unavailable: {e:#}"));
+                self.tray_error = Some(format!(
+                    "TRAY MISSING — always-on shell is broken without an icon. {e:#}\n{}",
+                    tray_failure_hint()
+                ));
+                // Keep retrying every 3s for a while after start.
+                self.tray_retry_at = Some(Instant::now() + Duration::from_secs(3));
             }
         }
     }
@@ -634,21 +716,17 @@ impl YapperApp {
             Vec::new()
         };
         for a in actions {
-            match a {
-                TrayAction::Open => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    self.status = "window focused".into();
-                }
-                TrayAction::LoadStt => self.load_stt(),
-                TrayAction::UnloadStt => self.unload_stt(),
-                TrayAction::LoadTts => self.load_tts(),
-                TrayAction::UnloadTts => self.unload_tts(),
-                TrayAction::Quit => {
-                    let _ = self.workers.unload_all();
-                    self.workers.shutdown_all();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+            match tray_menu_intent(a) {
+                ShellIntent::ShowWindow => self.show_window(ctx),
+                ShellIntent::HardQuit => self.arm_hard_quit_and_close(ctx),
+                ShellIntent::HideToTray => self.hide_to_tray(ctx),
+                ShellIntent::Noop => match a {
+                    TrayAction::LoadStt => self.load_stt(),
+                    TrayAction::UnloadStt => self.unload_stt(),
+                    TrayAction::LoadTts => self.load_tts(),
+                    TrayAction::UnloadTts => self.unload_tts(),
+                    _ => {}
+                },
             }
         }
     }
@@ -721,12 +799,17 @@ enum CaptureOutcome {
 
 impl eframe::App for YapperApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_viewport_lifecycle(ctx);
         self.poll_hotkey_capture(ctx);
         self.poll_hotkeys();
         self.poll_tray(ctx);
         self.poll_record_level();
         // Faster repaint while capturing a hotkey so key events feel immediate.
-        let repaint_ms = if self.hotkey_capture.is_some() { 16 } else { 100 };
+        let repaint_ms = if self.hotkey_capture.is_some() || self.tray.is_none() {
+            16
+        } else {
+            100
+        };
         ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
@@ -734,14 +817,52 @@ impl eframe::App for YapperApp {
                 ui.heading("Yapper");
                 ui.separator();
                 ui.label(&self.status);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("Hide to tray")
+                        .on_hover_text("Keep running in the top-bar tray")
+                        .clicked()
+                    {
+                        self.hide_to_tray(ctx);
+                    }
+                });
             });
             if let Some(err) = &self.hotkey_error {
                 ui.colored_label(egui::Color32::YELLOW, err);
             }
             if let Some(err) = &self.tray_error {
-                ui.colored_label(egui::Color32::YELLOW, err);
+                ui.colored_label(egui::Color32::from_rgb(255, 120, 80), err);
             }
         });
+
+        if self.exit_prompt == ExitPromptState::AwaitingConfirm {
+            egui::Window::new("Exit Yapper completely?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(
+                        "This unloads models and stops the tray process.\n\
+                         Prefer Hide to tray if you only want the window gone.",
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.exit_prompt = self.exit_prompt.on_cancel();
+                        }
+                        if ui
+                            .button("Exit completely")
+                            .on_hover_text("Same as tray → Quit")
+                            .clicked()
+                        {
+                            let (next, intent) = self.exit_prompt.on_confirm();
+                            self.exit_prompt = next;
+                            if intent == Some(ShellIntent::HardQuit) {
+                                self.arm_hard_quit_and_close(ctx);
+                            }
+                        }
+                    });
+                });
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical()
@@ -905,26 +1026,40 @@ impl eframe::App for YapperApp {
                     }
 
                     ui.separator();
-                    if ui.button("Save settings").clicked() {
-                        self.persist();
-                        self.status = "settings saved".into();
-                    }
-                    if ui.button("Quit").clicked() {
-                        let _ = self.workers.unload_all();
-                        self.workers.shutdown_all();
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Save settings").clicked() {
+                            self.persist();
+                            self.status = "settings saved".into();
+                        }
+                        if ui
+                            .button("Hide to tray")
+                            .on_hover_text("Close window but keep hotkeys and models")
+                            .clicked()
+                        {
+                            self.hide_to_tray(ctx);
+                        }
+                        if ui
+                            .button("Exit…")
+                            .on_hover_text("Fully quit (same as tray → Quit)")
+                            .clicked()
+                        {
+                            self.exit_prompt = self.exit_prompt.on_exit_clicked();
+                        }
+                    });
                 });
         });
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Only reached on real process exit (hard quit or unexpected teardown).
         let _ = self.workers.unload_all();
         self.workers.shutdown_all();
         stop_playback(&mut self.playback);
         if let Some(session) = self.recording.take() {
             let _ = stop_recording(session);
         }
+        // Drop hotkeys so X11 grabs release before process death.
+        self.hotkeys = None;
     }
 }
 

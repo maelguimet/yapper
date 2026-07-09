@@ -4,7 +4,6 @@ use anyhow::{bail, Context, Result};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::str::FromStr;
-use std::sync::mpsc::{self, Receiver};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyAction {
@@ -12,9 +11,13 @@ pub enum HotkeyAction {
     PushToTalk,
 }
 
+/// Live global-hotkey grabs. Events are polled on the UI thread via
+/// [`HotkeyHub::poll_events`] so re-register never races a background receiver
+/// on the crate-global event channel (B13 root cause).
 pub struct HotkeyHub {
-    _manager: GlobalHotKeyManager,
-    pub rx: Receiver<HotkeyEvent>,
+    manager: GlobalHotKeyManager,
+    /// Bound keys + action mapping for the global event channel.
+    bindings: Vec<(HotKey, HotkeyAction)>,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +27,8 @@ pub struct HotkeyEvent {
 }
 
 impl HotkeyHub {
+    /// Register read-aloud and push-to-talk grabs. Caller must drop any previous
+    /// hub first so X11 key grabs are released before re-bind.
     pub fn register(read_aloud: &str, push_to_talk: &str) -> Result<Self> {
         let manager = GlobalHotKeyManager::new().context("create GlobalHotKeyManager")?;
         let hk_read = parse_hotkey(read_aloud).with_context(|| format!("parse {read_aloud}"))?;
@@ -31,37 +36,88 @@ impl HotkeyHub {
         manager
             .register(hk_read)
             .with_context(|| format!("register read_aloud {read_aloud}"))?;
-        manager
-            .register(hk_ptt)
-            .with_context(|| format!("register push_to_talk {push_to_talk}"))?;
+        if let Err(e) = manager.register(hk_ptt) {
+            let _ = manager.unregister(hk_read);
+            return Err(e).with_context(|| format!("register push_to_talk {push_to_talk}"));
+        }
 
-        let id_read = hk_read.id();
-        let id_ptt = hk_ptt.id();
-        let (tx, rx) = mpsc::channel();
-
-        // Poll thread
-        std::thread::spawn(move || {
-            let event_rx = GlobalHotKeyEvent::receiver();
-            while let Ok(ev) = event_rx.recv() {
-                let pressed = matches!(ev.state, HotKeyState::Pressed);
-                let action = if ev.id == id_read {
-                    Some(HotkeyAction::ReadAloud)
-                } else if ev.id == id_ptt {
-                    Some(HotkeyAction::PushToTalk)
-                } else {
-                    None
-                };
-                if let Some(action) = action {
-                    let _ = tx.send(HotkeyEvent { action, pressed });
-                }
-            }
-        });
+        // Drain stale events from a previous hub so they cannot fire wrong actions.
+        drain_global_hotkey_events();
 
         Ok(Self {
-            _manager: manager,
-            rx,
+            manager,
+            bindings: vec![
+                (hk_read, HotkeyAction::ReadAloud),
+                (hk_ptt, HotkeyAction::PushToTalk),
+            ],
         })
     }
+
+    /// Poll the crate-global hotkey channel; map IDs to our bindings.
+    pub fn poll_events(&self) -> Vec<HotkeyEvent> {
+        let mut out = Vec::new();
+        let rx = GlobalHotKeyEvent::receiver();
+        while let Ok(ev) = rx.try_recv() {
+            let pressed = matches!(ev.state, HotKeyState::Pressed);
+            if let Some((_, action)) = self.bindings.iter().find(|(hk, _)| hk.id() == ev.id) {
+                out.push(HotkeyEvent {
+                    action: *action,
+                    pressed,
+                });
+            }
+        }
+        out
+    }
+
+    /// Specs currently registered (config string form), for tests / status.
+    pub fn registered_specs(&self) -> Result<Vec<String>> {
+        self.bindings
+            .iter()
+            .map(|(hk, _)| format_hotkey(hk))
+            .collect()
+    }
+}
+
+impl Drop for HotkeyHub {
+    fn drop(&mut self) {
+        for (hk, _) in &self.bindings {
+            let _ = self.manager.unregister(*hk);
+        }
+        self.bindings.clear();
+        drain_global_hotkey_events();
+    }
+}
+
+fn drain_global_hotkey_events() {
+    let rx = GlobalHotKeyEvent::receiver();
+    while rx.try_recv().is_ok() {}
+}
+
+/// Drop previous hub (releasing grabs), then register new specs.
+///
+/// This is the Apply-path primitive: never call `register` while an old hub
+/// still holds the same (or any) X11 grabs.
+pub fn reregister(
+    previous: Option<HotkeyHub>,
+    read_aloud: &str,
+    push_to_talk: &str,
+) -> Result<HotkeyHub> {
+    // Explicit drop before new grabs — assignment order alone is not enough if
+    // register() runs while `previous` still lives in the caller's local.
+    drop(previous);
+    // Brief yield so X11 releases the old grabs before we re-acquire.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    HotkeyHub::register(read_aloud, push_to_talk)
+}
+
+/// Validate and canonicalize a hotkey config string (parse → format).
+pub fn canonicalize_hotkey_spec(spec: &str) -> Result<String> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        bail!("hotkey binding cannot be empty");
+    }
+    let hk = parse_hotkey(trimmed).with_context(|| format!("parse {trimmed}"))?;
+    format_hotkey(&hk)
 }
 
 /// Modifier state for the hotkey Capture picker (egui flags + platform Super).
@@ -162,7 +218,6 @@ pub fn parse_hotkey(spec: &str) -> Result<HotKey> {
             "ctrl" | "control" => mods |= Modifiers::CONTROL,
             "alt" | "option" => mods |= Modifiers::ALT,
             other => {
-                // single character or named key
                 let code = if other.len() == 1 {
                     let ch = other.chars().next().unwrap().to_ascii_uppercase();
                     code_from_char(ch)?
@@ -179,7 +234,6 @@ pub fn parse_hotkey(spec: &str) -> Result<HotKey> {
 }
 
 fn to_code_name(s: &str) -> String {
-    // global-hotkey uses KeyA, Digit1, etc.
     let u = s.to_ascii_uppercase();
     if u.len() == 1 && u.chars().next().unwrap().is_ascii_alphabetic() {
         return format!("Key{u}");
@@ -213,13 +267,11 @@ fn normalize_key_token(key: &str) -> Result<String> {
             return Ok(ch.to_string());
         }
     }
-    // Named keys: keep Pascal-ish single token (Space, Escape, F1…).
     let named = if t.eq_ignore_ascii_case("space") {
         "Space".into()
     } else if t.eq_ignore_ascii_case("esc") || t.eq_ignore_ascii_case("escape") {
         "Escape".into()
     } else {
-        // Preserve F-keys casing (F1)
         let upper = t.to_ascii_uppercase();
         if upper.starts_with('F')
             && upper.len() > 1
@@ -227,7 +279,6 @@ fn normalize_key_token(key: &str) -> Result<String> {
         {
             upper
         } else {
-            // Title-case first letter for Code names that FromStr accepts
             let mut c = t.chars();
             match c.next() {
                 Some(f) => f.to_ascii_uppercase().to_string() + c.as_str(),
@@ -235,14 +286,12 @@ fn normalize_key_token(key: &str) -> Result<String> {
             }
         }
     };
-    // Ensure parseable via Code path
     let _ = Code::from_str(&to_code_name(&named))
         .map_err(|_| anyhow::anyhow!("unknown key: {key}"))?;
     Ok(named)
 }
 
 fn code_to_key_token(code: Code) -> Result<String> {
-    // Prefer stable Debug names from keyboard-types / global-hotkey (KeyA, Digit1, …).
     let dbg = format!("{code:?}");
     if let Some(rest) = dbg.strip_prefix("Key") {
         if rest.len() == 1 && rest.chars().next().unwrap().is_ascii_alphabetic() {
@@ -264,7 +313,6 @@ mod tests {
     #[test]
     fn parse_super_shift_s() {
         let hk = parse_hotkey("Super+Shift+S").unwrap();
-        // id is deterministic from mods+key
         let _ = hk.id();
     }
 
@@ -274,8 +322,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_host_alt_shift_bindings() {
+        // Host config from user feedback B13
+        let ra = parse_hotkey("Alt+Shift+S").unwrap();
+        let ptt = parse_hotkey("Alt+Shift+Q").unwrap();
+        assert_eq!(format_hotkey(&ra).unwrap(), "Alt+Shift+S");
+        assert_eq!(format_hotkey(&ptt).unwrap(), "Alt+Shift+Q");
+    }
+
+    #[test]
     fn reject_empty() {
         assert!(parse_hotkey("").is_err());
+        assert!(canonicalize_hotkey_spec("").is_err());
+        assert!(canonicalize_hotkey_spec("   ").is_err());
+    }
+
+    #[test]
+    fn canonicalize_round_trips_defaults_and_host() {
+        for spec in [
+            "Super+Shift+S",
+            "Super+Shift+R",
+            "Alt+Shift+S",
+            "Alt+Shift+Q",
+            "Ctrl+Alt+R",
+        ] {
+            let c = canonicalize_hotkey_spec(spec).unwrap();
+            assert_eq!(c, spec);
+            let again = canonicalize_hotkey_spec(&c).unwrap();
+            assert_eq!(again, c);
+        }
     }
 
     #[test]
@@ -285,7 +360,6 @@ mod tests {
         let hk = parse_hotkey(&spec).unwrap();
         let again = format_hotkey(&hk).unwrap();
         assert_eq!(again, "Super+Shift+S");
-        // Same physical hotkey id for re-register
         assert_eq!(hk.id(), parse_hotkey(&again).unwrap().id());
     }
 
@@ -308,11 +382,8 @@ mod tests {
         assert!(format_hotkey_parts(false, true, false, false, "NotAKeyXYZ").is_err());
     }
 
-    /// Capture path with Super held (Linux Mod4 / platform_super=true).
-    /// Product defaults Super+Shift+S and Super+Shift+R must keep Super.
     #[test]
     fn capture_mapping_preserves_super_for_default_combos() {
-        // Linux: egui mac_cmd=false, Super only from platform_super.
         let mods_s = capture_mod_state(false, false, false, true, true);
         assert!(mods_s.super_key);
         assert_eq!(
@@ -324,19 +395,16 @@ mod tests {
             format_capture_hotkey(mods_r, "R").unwrap(),
             "Super+Shift+R"
         );
-        // Round-trip through parse (Apply path).
         let hk = parse_hotkey("Super+Shift+S").unwrap();
         assert_eq!(format_hotkey(&hk).unwrap(), "Super+Shift+S");
     }
 
-    /// Capture path without Super: must not invent Super from bare Shift/Ctrl.
     #[test]
     fn capture_mapping_without_super_is_super_less() {
         let mods = capture_mod_state(false, false, false, true, false);
         assert!(!mods.super_key);
         assert_eq!(format_capture_hotkey(mods, "S").unwrap(), "Shift+S");
 
-        // Linux trap: egui command mirrors ctrl — must not treat as Super.
         let linux_ctrl = capture_mod_state(false, true, false, false, false);
         assert!(!linux_ctrl.super_key);
         assert_eq!(
@@ -345,7 +413,6 @@ mod tests {
         );
     }
 
-    /// macOS path: mac_cmd alone means Super in our config strings.
     #[test]
     fn capture_mapping_mac_cmd_is_super() {
         let mods = capture_mod_state(true, false, false, true, false);
@@ -354,5 +421,60 @@ mod tests {
             format_capture_hotkey(mods, "S").unwrap(),
             "Super+Shift+S"
         );
+    }
+
+    /// reregister drops previous hub then binds new specs (Apply path).
+    /// Uses DISPLAY when present; skips cleanly if no X11 for manager create.
+    #[test]
+    fn reregister_drops_then_binds_new_specs() {
+        if std::env::var_os("DISPLAY").is_none() {
+            eprintln!("skip: no DISPLAY for hotkey manager");
+            return;
+        }
+        let first = match HotkeyHub::register("Alt+Shift+F9", "Alt+Shift+F10") {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("skip: first register failed: {e:#}");
+                return;
+            }
+        };
+        let specs = first.registered_specs().unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0], "Alt+Shift+F9");
+        assert_eq!(specs[1], "Alt+Shift+F10");
+
+        let second = match reregister(Some(first), "Alt+Shift+F11", "Alt+Shift+F12") {
+            Ok(h) => h,
+            Err(e) => {
+                panic!("reregister must succeed after drop: {e:#}");
+            }
+        };
+        let specs2 = second.registered_specs().unwrap();
+        assert_eq!(specs2[0], "Alt+Shift+F11");
+        assert_eq!(specs2[1], "Alt+Shift+F12");
+
+        // Third rebind back to host-like Alt+Shift combos
+        let third = reregister(Some(second), "Alt+Shift+S", "Alt+Shift+Q")
+            .expect("third reregister");
+        let specs3 = third.registered_specs().unwrap();
+        assert_eq!(specs3[0], "Alt+Shift+S");
+        assert_eq!(specs3[1], "Alt+Shift+Q");
+        drop(third);
+    }
+
+    #[test]
+    fn reregister_from_none_works() {
+        if std::env::var_os("DISPLAY").is_none() {
+            eprintln!("skip: no DISPLAY");
+            return;
+        }
+        match reregister(None, "Ctrl+Shift+F9", "Ctrl+Shift+F10") {
+            Ok(h) => {
+                let s = h.registered_specs().unwrap();
+                assert_eq!(s[0], "Ctrl+Shift+F9");
+                drop(h);
+            }
+            Err(e) => eprintln!("skip: {e:#}"),
+        }
     }
 }

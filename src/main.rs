@@ -5,6 +5,7 @@ mod audio;
 mod config;
 mod hotkeys;
 mod ipc;
+mod lifecycle;
 mod policy;
 mod tray;
 mod workers;
@@ -83,7 +84,8 @@ fn run_doctor() -> anyhow::Result<()> {
     println!("  session: {:?}", std::env::var("XDG_SESSION_TYPE").ok());
 
     for bin in [
-        "ffmpeg", "xclip", "xdotool", "nvidia-smi", "python3", "espeak-ng",
+        "ffmpeg", "ffplay", "mpv", "arecord", "xclip", "xdotool", "nvidia-smi",
+        "python3", "espeak-ng", "pactl",
     ] {
         let ok = std::process::Command::new("which")
             .arg(bin)
@@ -102,6 +104,19 @@ fn run_doctor() -> anyhow::Result<()> {
         } else {
             "no"
         }
+    );
+
+    let tray_report = crate::tray::tray_host_diagnostics();
+    println!("  tray host: {}", tray_report.summary_line());
+    if !tray_report.looks_ready() {
+        println!("  tray: NOT READY — {}", tray_report.hint);
+    } else {
+        println!(
+            "  tray: libs look OK (icon still needs a StatusNotifier host in the session)"
+        );
+    }
+    println!(
+        "  always-on: close/minimize hide to tray; Quit only from tray menu (or confirmed Exit)"
     );
 
     let stt_mod = std::path::Path::new(&cfg.paths.python_root).join("yapper_stt");

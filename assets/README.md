@@ -1,13 +1,16 @@
 # Assets
 
-Ship only small non-weight assets here (icons, desktop metadata).
+| File | Purpose |
+|------|---------|
+| `yapper-tray.rgba` | Tray icon (raw RGBA): 4-byte width LE, 4-byte height LE, then `w*h*4` pixels. Loaded by `tray.rs` when present. |
 
-**Eve voice WAVs and model weights are not stored in git.**  
-At install/dev setup, copy or symlink from:
+Generate or regenerate:
 
+```bash
+# from repo root — simple 32×32 mic glyph
+python3 - <<'PY'
+# see install / scripts, or copy from tray::build_mic_icon_rgba
+PY
 ```
-~/projects/tts/clone/gold/eve_*.wav  →  ~/.local/share/yapper/voices/eve/
-~/projects/tts/clone/knobs.json      →  ~/.local/share/yapper/voices/eve/knobs.json
-```
 
-Icon: add `yapper.png` / `.svg` here when designed.
+Fallback: if the file is missing, the app draws a procedural mic glyph in memory.
