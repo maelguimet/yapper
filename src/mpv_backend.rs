@@ -1,11 +1,14 @@
 //! mpv IPC playback backend + WAV duration helpers.
 
 use anyhow::{bail, Context, Result};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+static MPV_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct MpvBackend {
     child: Child,
@@ -52,7 +55,6 @@ impl MpvBackend {
                 bail!("mpv exited before IPC ready (status={status})");
             }
             if ipc.exists() {
-                // Verify we can actually connect.
                 match UnixStream::connect(&ipc) {
                     Ok(stream) => {
                         drop(stream);
@@ -91,28 +93,61 @@ impl MpvBackend {
         UnixStream::connect(path).with_context(|| format!("connect {}", path.display()))
     }
 
-    pub(crate) fn command_raw(&self, cmd: &str) -> Result<String> {
+    /// Send a JSON command with a unique request_id; return matching response line.
+    pub(crate) fn command_raw(&self, cmd_array_json: &str) -> Result<String> {
         if self.fallback {
             bail!("fallback player has no IPC");
         }
+        let request_id = MPV_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        // cmd_array_json is the value of "command", e.g. ["get_property","time-pos"]
+        let payload = format!(
+            r#"{{"command":{cmd_array_json},"request_id":{request_id}}}"#
+        );
         let mut stream = self.connect()?;
-        stream.set_read_timeout(Some(Duration::from_millis(300)))?;
+        stream.set_read_timeout(Some(Duration::from_millis(400)))?;
         stream.set_write_timeout(Some(Duration::from_millis(300)))?;
-        stream.write_all(cmd.as_bytes())?;
+        stream.write_all(payload.as_bytes())?;
         stream.write_all(b"\n")?;
-        let mut buf = vec![0u8; 4096];
-        let n = stream.read(&mut buf).unwrap_or(0);
-        Ok(String::from_utf8_lossy(&buf[..n]).into_owned())
+
+        let mut reader = BufReader::new(stream);
+        let deadline = Instant::now() + Duration::from_millis(400);
+        let mut line = String::new();
+        loop {
+            if Instant::now() >= deadline {
+                bail!("mpv IPC response timeout for request_id={request_id}");
+            }
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => bail!("mpv IPC EOF waiting for request_id={request_id}"),
+                Ok(_) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if let Some(resp) = match_mpv_response(trimmed, request_id) {
+                        return Ok(resp.to_string());
+                    }
+                    // Event or unrelated response — keep reading.
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    bail!("mpv IPC read timeout for request_id={request_id}");
+                }
+                Err(e) => return Err(e).context("mpv IPC read"),
+            }
+        }
     }
 
     pub(crate) fn pause(&mut self, paused: bool) -> Result<()> {
         if self.fallback {
             return Ok(());
         }
-        let _ = self.command_raw(&format!(
-            r#"{{"command":["set_property","pause",{}]}}"#,
-            if paused { "true" } else { "false" }
-        ));
+        let flag = if paused { "true" } else { "false" };
+        let resp = self.command_raw(&format!(r#"["set_property","pause",{flag}]"#))?;
+        if !mpv_response_ok(&resp) {
+            bail!("mpv pause failed: {resp}");
+        }
         Ok(())
     }
 
@@ -120,9 +155,10 @@ impl MpvBackend {
         if self.fallback {
             return Ok(());
         }
-        let _ = self.command_raw(&format!(
-            r#"{{"command":["seek",{secs},"absolute"]}}"#
-        ));
+        let resp = self.command_raw(&format!(r#"["seek",{secs},"absolute"]"#))?;
+        if !mpv_response_ok(&resp) {
+            bail!("mpv seek failed: {resp}");
+        }
         Ok(())
     }
 
@@ -130,9 +166,10 @@ impl MpvBackend {
         if self.fallback {
             return Ok(());
         }
-        let _ = self.command_raw(&format!(
-            r#"{{"command":["set_property","volume",{vol}]}}"#
-        ));
+        let resp = self.command_raw(&format!(r#"["set_property","volume",{vol}]"#))?;
+        if !mpv_response_ok(&resp) {
+            bail!("mpv volume failed: {resp}");
+        }
         Ok(())
     }
 
@@ -141,7 +178,7 @@ impl MpvBackend {
             return None;
         }
         let resp = self
-            .command_raw(r#"{"command":["get_property","time-pos"]}"#)
+            .command_raw(r#"["get_property","time-pos"]"#)
             .ok()?;
         parse_mpv_data_f64(&resp)
     }
@@ -151,7 +188,7 @@ impl MpvBackend {
             return None;
         }
         let resp = self
-            .command_raw(r#"{"command":["get_property","duration"]}"#)
+            .command_raw(r#"["get_property","duration"]"#)
             .ok()?;
         parse_mpv_data_f64(&resp)
     }
@@ -178,9 +215,55 @@ impl Drop for MpvBackend {
     }
 }
 
+/// From a buffer that may contain multiple JSON lines / events, return the
+/// line matching `request_id` (ignoring event objects).
+pub fn match_mpv_response(line_or_buffer: &str, request_id: u64) -> Option<&str> {
+    for line in line_or_buffer.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+        // Skip pure events.
+        if v.get("event").is_some() && v.get("request_id").is_none() {
+            continue;
+        }
+        let rid = v
+            .get("request_id")
+            .and_then(|r| r.as_u64().or_else(|| r.as_i64().map(|i| i as u64)));
+        if rid == Some(request_id) {
+            return Some(trimmed);
+        }
+    }
+    None
+}
+
+pub fn mpv_response_ok(resp: &str) -> bool {
+    let v: serde_json::Value = match serde_json::from_str(resp.trim()) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    v.get("error").and_then(|e| e.as_str()) == Some("success")
+}
+
 pub(crate) fn parse_mpv_data_f64(resp: &str) -> Option<f64> {
-    // {"data":12.3,"request_id":0,"error":"success"}
-    let v: serde_json::Value = serde_json::from_str(resp.trim()).ok()?;
+    // Prefer matching a single response object; also tolerate multi-line buffers.
+    let line = if resp.contains('\n') {
+        // Without a known request_id, take the first success line with data.
+        resp.lines().find(|l| {
+            let t = l.trim();
+            !t.is_empty()
+                && serde_json::from_str::<serde_json::Value>(t)
+                    .ok()
+                    .is_some_and(|v| {
+                        v.get("event").is_none()
+                            && v.get("error").and_then(|e| e.as_str()) == Some("success")
+                    })
+        })?
+    } else {
+        resp
+    };
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if v.get("error").and_then(|e| e.as_str()) != Some("success") {
         return None;
     }
@@ -249,3 +332,37 @@ pub fn wav_duration_from_bytes(bytes: &[u8]) -> Result<f64> {
     Ok(data_bytes as f64 / (sample_rate as f64 * bytes_per_frame as f64))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn match_mpv_skips_events_and_finds_request_id() {
+        let buf = concat!(
+            r#"{"event":"file-loaded"}"#,
+            "\n",
+            r#"{"request_id":42,"error":"success","data":12.3}"#,
+            "\n",
+        );
+        let line = match_mpv_response(buf, 42).expect("response");
+        assert!(line.contains("12.3"));
+        assert!(mpv_response_ok(line));
+        assert_eq!(parse_mpv_data_f64(line), Some(12.3));
+    }
+
+    #[test]
+    fn match_mpv_ignores_wrong_request_id() {
+        let buf = r#"{"request_id":7,"error":"success","data":1.0}"#;
+        assert!(match_mpv_response(buf, 42).is_none());
+    }
+
+    #[test]
+    fn parse_mpv_multiline_picks_success_data() {
+        let buf = concat!(
+            r#"{"event":"start-file"}"#,
+            "\n",
+            r#"{"request_id":1,"error":"success","data":3.5}"#,
+        );
+        assert_eq!(parse_mpv_data_f64(buf), Some(3.5));
+    }
+}

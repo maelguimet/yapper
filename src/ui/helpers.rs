@@ -11,6 +11,129 @@ pub const TEXT_PANEL_MIN_ROWS: usize = 6;
 pub const TEXT_PANEL_MAX_ROWS: usize = 28;
 const TEXT_ROW_HEIGHT_EST: f32 = 18.0;
 
+/// Fallback tones when async list has not arrived (or fails).
+pub fn fallback_tones() -> Vec<String> {
+    vec![
+        "neutral".into(),
+        "calm".into(),
+        "excited".into(),
+        "serious".into(),
+    ]
+}
+
+/// Primary product tab labels (never STT/TTS).
+pub fn primary_tab_labels() -> [&'static str; 3] {
+    ["Dictate", "Speak", "Settings"]
+}
+
+/// True when loaded STT weights match the Settings selector.
+pub fn stt_ready_for_selected(
+    stt_loaded: bool,
+    loaded_model: Option<&str>,
+    selected_model: &str,
+) -> bool {
+    stt_loaded
+        && loaded_model
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some_and(|m| m == selected_model)
+}
+
+/// Whether Speak restart must use out-of-band kill (same path as Stop).
+pub fn speak_restart_needs_oob_kill(synth_in_flight: bool) -> bool {
+    synth_in_flight
+}
+
+/// Speak primary button label when a job/playback is active.
+pub fn speak_action_label(tts_busy: bool) -> &'static str {
+    if tts_busy {
+        "Restart"
+    } else {
+        "Speak"
+    }
+}
+
+/// Stop enabled only while synth or playback is active.
+pub fn can_stop_tts(tts_busy: bool) -> bool {
+    tts_busy
+}
+
+/// Replay when idle and a replayable file exists.
+pub fn can_replay_tts(tts_busy: bool, replay_exists: bool) -> bool {
+    !tts_busy && replay_exists
+}
+
+/// Dictation chip label; distinguishes active vs selected when they differ.
+pub fn dictation_chip_label(
+    loading: bool,
+    loaded: bool,
+    active_model: Option<&str>,
+    selected_model: &str,
+) -> String {
+    if loading {
+        return format!("Dictation: loading {selected_model}");
+    }
+    if !loaded {
+        return "Dictation: unloaded".into();
+    }
+    let active = active_model.unwrap_or("loaded");
+    if active != selected_model {
+        format!("Dictation: {active} (selected {selected_model})")
+    } else {
+        format!("Dictation: {active}")
+    }
+}
+
+pub fn voice_chip_label(loading: bool, loaded: bool, model: Option<&str>) -> String {
+    if loading {
+        return "Voice: loading".into();
+    }
+    if !loaded {
+        return "Voice: unloaded".into();
+    }
+    match model.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(m) if m.len() > 18 => "Voice: loaded".into(),
+        Some(m) => format!("Voice: {m}"),
+        None => "Voice: loaded".into(),
+    }
+}
+
+/// Transport chrome: never lead with idle `0:00/0:00`.
+pub fn transport_status_line(
+    has_active_job: bool,
+    playing_index: Option<usize>,
+    total: usize,
+    transport_idle: bool,
+    time_label: &str,
+    synth_in_flight: bool,
+) -> String {
+    if !has_active_job && transport_idle {
+        return "Idle".into();
+    }
+    if has_active_job && total > 0 {
+        let n = playing_index.map(|i| i + 1).unwrap_or_else(|| {
+            // Synthesizing first chunk before any play.
+            1usize.min(total)
+        });
+        let phase = if synth_in_flight && transport_idle {
+            "Synthesizing"
+        } else if transport_idle {
+            "Buffering"
+        } else {
+            "Speaking"
+        };
+        if transport_idle && time_label.contains("0:00") {
+            return format!("{phase} {n}/{total}");
+        }
+        return format!("{phase} {n}/{total} · sentence {time_label}");
+    }
+    if transport_idle {
+        "Idle".into()
+    } else {
+        format!("Playing · {time_label}")
+    }
+}
+
 /// TTS character-count label + optional length warning (pure, tested).
 pub fn tts_text_stats(text: &str) -> (String, Option<String>) {
     let n = text.chars().count();
@@ -34,15 +157,21 @@ pub fn tts_text_stats(text: &str) -> (String, Option<String>) {
 }
 
 /// Empty-state guidance when a work action cannot run yet.
-/// Model loads auto-run on Record/Speak — do not claim Settings is required.
+/// Quiet helper — not a yellow error. Model loads on first use.
 pub fn stt_empty_guidance(stt_loaded: bool, mic_ok: bool) -> Option<&'static str> {
     if !mic_ok {
         return Some("Select a microphone before recording.");
     }
     if !stt_loaded {
-        return Some("STT loads on first transcription.");
+        return Some("Dictation model loads on first use.");
     }
     None
+}
+
+/// Whether unloaded-model guidance should use warning chrome (yellow).
+/// Mic failures are real warnings; unloaded model is not.
+pub fn stt_guidance_is_warning(stt_loaded: bool, mic_ok: bool) -> bool {
+    !mic_ok && stt_empty_guidance(stt_loaded, mic_ok).is_some()
 }
 
 pub fn tts_empty_guidance(tts_loaded: bool, text_empty: bool) -> Option<&'static str> {
@@ -50,9 +179,15 @@ pub fn tts_empty_guidance(tts_loaded: bool, text_empty: bool) -> Option<&'static
         return Some("Paste or type text to speak.");
     }
     if !tts_loaded {
-        return Some("TTS loads on first Speak.");
+        return Some("Voice model loads on first Speak.");
     }
     None
+}
+
+pub fn tts_guidance_is_warning(_tts_loaded: bool, text_empty: bool) -> bool {
+    // Empty text is quiet helper, not an error.
+    let _ = text_empty;
+    false
 }
 
 /// Chunk temp files safe to delete after Stop; keep `last_success` for Replay.
@@ -120,7 +255,7 @@ pub fn truncate_display(s: &str, max_chars: usize) -> String {
     out
 }
 
-/// Symmetric load badge text: `STT * medium` / `TTS - unloaded`.
+/// Symmetric load badge text for advanced Settings (not primary chrome).
 pub fn load_status_label(role: &str, loaded: bool, model_id: Option<&str>) -> String {
     if loaded {
         match model_id.map(str::trim).filter(|s| !s.is_empty()) {
@@ -139,9 +274,88 @@ pub fn text_panel_rows(available_height: f32, share: f32) -> usize {
     rows.clamp(TEXT_PANEL_MIN_ROWS, TEXT_PANEL_MAX_ROWS)
 }
 
+/// After any synth request error that may have killed the worker, always refresh model status.
+/// (WorkerManager::synthesize_timeout kills TTS on any request Err.)
+pub fn synth_error_resets_worker() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_tabs_are_friendly_not_stt_tts() {
+        let tabs = primary_tab_labels();
+        assert_eq!(tabs, ["Dictate", "Speak", "Settings"]);
+        for t in tabs {
+            assert!(!t.eq_ignore_ascii_case("STT"), "{t}");
+            assert!(!t.eq_ignore_ascii_case("TTS"), "{t}");
+            assert!(!t.contains("STT"), "{t}");
+            assert!(!t.contains("TTS"), "{t}");
+        }
+    }
+
+    #[test]
+    fn stt_ready_requires_matching_selected_model() {
+        assert!(!stt_ready_for_selected(false, None, "small"));
+        assert!(!stt_ready_for_selected(true, Some("small"), "medium"));
+        assert!(!stt_ready_for_selected(true, None, "small"));
+        assert!(stt_ready_for_selected(true, Some("medium"), "medium"));
+        assert!(stt_ready_for_selected(true, Some("small"), "small"));
+    }
+
+    #[test]
+    fn speak_restart_requires_oob_kill_when_synth_in_flight() {
+        assert!(speak_restart_needs_oob_kill(true));
+        assert!(!speak_restart_needs_oob_kill(false));
+        assert_eq!(speak_action_label(true), "Restart");
+        assert_eq!(speak_action_label(false), "Speak");
+        assert!(can_stop_tts(true));
+        assert!(!can_stop_tts(false));
+        assert!(can_replay_tts(false, true));
+        assert!(!can_replay_tts(true, true));
+        assert!(!can_replay_tts(false, false));
+    }
+
+    #[test]
+    fn dictation_chip_shows_selected_vs_active_mismatch() {
+        let s = dictation_chip_label(false, true, Some("small"), "medium");
+        assert!(s.contains("small"), "{s}");
+        assert!(s.contains("medium"), "{s}");
+        assert_eq!(
+            dictation_chip_label(false, false, None, "small"),
+            "Dictation: unloaded"
+        );
+        assert!(dictation_chip_label(true, false, None, "medium").contains("loading"));
+    }
+
+    #[test]
+    fn transport_idle_hides_zero_time() {
+        assert_eq!(
+            transport_status_line(false, None, 0, true, "0:00 / 0:00", false),
+            "Idle"
+        );
+        let s = transport_status_line(true, Some(1), 9, false, "0:12 / 0:22", false);
+        assert!(s.contains("2/9"), "{s}");
+        assert!(s.contains("0:12"), "{s}");
+        let synth = transport_status_line(true, None, 5, true, "0:00 / 0:00", true);
+        assert!(synth.contains("Synthesizing"), "{synth}");
+        assert!(synth.contains("1/5"), "{synth}");
+        assert!(!synth.contains("0:00 / 0:00"), "{synth}");
+    }
+
+    #[test]
+    fn synth_errors_always_reset_worker_flag() {
+        assert!(synth_error_resets_worker());
+    }
+
+    #[test]
+    fn fallback_tones_non_empty() {
+        let t = fallback_tones();
+        assert!(t.contains(&"neutral".into()));
+        assert!(t.len() >= 3);
+    }
 
     #[test]
     fn truncate_preserves_short_strings() {
@@ -201,13 +415,15 @@ mod tests {
     fn empty_guidance_for_stt_and_tts() {
         let stt = stt_empty_guidance(false, true).unwrap().to_ascii_lowercase();
         assert!(
-            stt.contains("loads on first") || stt.contains("transcription"),
+            stt.contains("loads on first") || stt.contains("dictation"),
             "{stt}"
         );
         assert!(
             !stt.contains("settings"),
             "must not require Settings for autoload path: {stt}"
         );
+        assert!(!stt_guidance_is_warning(false, true));
+        assert!(stt_guidance_is_warning(true, false));
         assert!(stt_empty_guidance(true, false)
             .unwrap()
             .to_ascii_lowercase()
@@ -215,10 +431,11 @@ mod tests {
         assert!(stt_empty_guidance(true, true).is_none());
         let tts = tts_empty_guidance(false, false).unwrap().to_ascii_lowercase();
         assert!(
-            tts.contains("loads on first") || tts.contains("speak"),
+            tts.contains("loads on first") || tts.contains("speak") || tts.contains("voice"),
             "{tts}"
         );
         assert!(!tts.contains("settings"), "{tts}");
+        assert!(!tts_guidance_is_warning(false, false));
         assert!(tts_empty_guidance(true, true)
             .unwrap()
             .to_ascii_lowercase()

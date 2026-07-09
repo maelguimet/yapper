@@ -29,12 +29,22 @@ pub(crate) enum HotkeyCaptureField {
     PushToTalk,
 }
 
-/// Primary work tabs: STT and TTS are peer workspaces; Settings holds models/hotkeys.
+/// Primary work tabs (user-facing: Dictate / Speak / Settings).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MainTab {
-    Stt,
-    Tts,
+    Dictate,
+    Speak,
     Settings,
+}
+
+impl MainTab {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            MainTab::Dictate => "Dictate",
+            MainTab::Speak => "Speak",
+            MainTab::Settings => "Settings",
+        }
+    }
 }
 
 /// Map an egui key to the hotkey config token (`S`, `1`, `Space`, …).

@@ -201,14 +201,15 @@ fn handle_cmd(
                 }
                 Err(e) => {
                     let err = format!("{e:#}");
+                    // Timeout path kills STT worker; always refresh badges from policy.
                     if err.to_ascii_lowercase().contains("timed out") {
                         let _ = msg_tx.send(AppMsg::WorkerTimedOut {
                             role: Role::Stt,
                             op: "transcribe".into(),
                             error: err.clone(),
                         });
-                        push_status(workers, msg_tx);
                     }
+                    push_status(workers, msg_tx);
                     let _ = msg_tx.send(AppMsg::TranscribeFailed { error: err, path });
                 }
             }
@@ -233,7 +234,7 @@ fn handle_cmd(
                 return;
             }
             let _ = total;
-            // Publish pid *before* blocking so Stop can kill mid-generate.
+            // Publish pid *before* blocking so Stop / Restart can kill mid-generate.
             sync_live_pids(workers, live);
             match workers.synthesize(&text, &language, &tone, &voice, &out_path) {
                 Ok(path) => {
@@ -248,17 +249,14 @@ fn handle_cmd(
                 }
                 Err(e) => {
                     let err = format!("{e:#}");
-                    let killed = err.to_ascii_lowercase().contains("timed out")
-                        || err.to_ascii_lowercase().contains("closed stdout")
-                        || err.to_ascii_lowercase().contains("disconnected");
-                    if killed {
-                        let _ = msg_tx.send(AppMsg::WorkerTimedOut {
-                            role: Role::Tts,
-                            op: "synthesize".into(),
-                            error: err.clone(),
-                        });
-                        push_status(workers, msg_tx);
-                    }
+                    // synthesize_timeout kills TTS on *any* request Err (timeout,
+                    // broken pipe, cancelled, crash). Always push ModelStatus.
+                    let _ = msg_tx.send(AppMsg::WorkerTimedOut {
+                        role: Role::Tts,
+                        op: "synthesize".into(),
+                        error: err.clone(),
+                    });
+                    push_status(workers, msg_tx);
                     let _ = msg_tx.send(AppMsg::TtsChunkFailed {
                         job_id,
                         index,
@@ -274,12 +272,33 @@ fn handle_cmd(
             live.set_tts(None);
             push_status(workers, msg_tx);
         }
+        JobCmd::ListTones => {
+            match workers.list_tones() {
+                Ok(tones) if !tones.is_empty() => {
+                    let _ = msg_tx.send(AppMsg::TonesListed { tones });
+                }
+                Ok(_) | Err(_) => {
+                    // Keep UI fallback tones; no dramatic error.
+                }
+            }
+            // list_tones may have spawned a worker without loading the model —
+            // do not claim TTS loaded; policy only marks on successful load.
+            push_status(workers, msg_tx);
+            sync_live_pids(workers, live);
+        }
         JobCmd::Shutdown => {
             workers.shutdown_all();
             live.set_tts(None);
             live.set_stt(None);
         }
     }
+}
+
+/// Pure classifier: any synth request failure that killed the worker must clear UI badges.
+#[cfg(test)]
+pub fn synth_error_clears_loaded_badge() -> bool {
+    // WorkerManager::synthesize_timeout always kill_worker on Err.
+    crate::ui::synth_error_resets_worker()
 }
 
 #[cfg(test)]
@@ -318,7 +337,15 @@ mod tests {
         }
     }
 
-    /// Registry kill path used by Stop: hanging process dies within ~1s, not a long wait.
+    #[test]
+    fn restart_and_stop_share_oob_kill_path() {
+        // Same LiveWorkerPids::kill_tts_now used by cancel_tts_pipeline and
+        // start_speak_job when speak_restart_needs_oob_kill is true.
+        assert!(crate::ui::speak_restart_needs_oob_kill(true));
+        assert!(synth_error_clears_loaded_badge());
+    }
+
+    /// Registry kill path used by Stop/Restart: hanging process dies within ~1s.
     #[test]
     fn live_worker_pids_kill_tts_interrupts_within_1s() {
         let mut child = Command::new("bash")

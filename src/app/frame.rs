@@ -5,7 +5,10 @@ use crate::audio::stop_recording;
 use crate::lifecycle::{ExitPromptState, ShellIntent};
 use crate::transport::TransportStatus;
 use crate::tray::pump_gtk_events;
-use crate::ui::{apply_yapper_theme, danger_button, truncate_display};
+use crate::ui::{
+    apply_yapper_theme, can_replay_tts, can_stop_tts, danger_button, primary_tab_labels,
+    speak_action_label, status_chip, truncate_display, ChipState,
+};
 use crate::x11util;
 use eframe::egui;
 
@@ -16,14 +19,12 @@ impl eframe::App for YapperApp {
             self.theme_applied = true;
         }
 
-        // tray-icon needs GTK iterations (B20: icon missing without this).
         pump_gtk_events();
         self.handle_viewport_lifecycle(ctx);
         self.poll_hotkey_capture(ctx);
         self.poll_hotkeys();
         self.poll_tray(ctx);
         self.poll_record_level();
-        // Drain background job results before transport so new chunks can play.
         self.drain_job_messages();
         self.poll_transport();
         self.autosave_prefs_if_dirty();
@@ -49,19 +50,20 @@ impl eframe::App for YapperApp {
         };
         ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
 
-        // ── Top chrome: brand, status, hide ──────────────────────────────
+        // ── Top chrome: brand, status sentence, chips, hide ───────────────
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.heading(
                     egui::RichText::new("Yapper")
                         .color(egui::Color32::from_rgb(120, 180, 255))
-                        .size(22.0),
+                        .size(20.0),
                 );
-                ui.separator();
+                ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new(&self.status)
-                        .color(egui::Color32::from_rgb(200, 210, 220)),
+                        .color(egui::Color32::from_rgb(200, 210, 220))
+                        .size(13.5),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
@@ -74,31 +76,29 @@ impl eframe::App for YapperApp {
                 });
             });
 
-            // Compact strip: models + mic + live rec pulse
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let stt_col = if self.stt_loaded {
-                    egui::Color32::from_rgb(100, 220, 140)
-                } else if self.stt_loading {
-                    egui::Color32::from_rgb(220, 200, 100)
+                let dict_state = if self.stt_loading {
+                    ChipState::Loading
+                } else if self.stt_loaded {
+                    ChipState::Good
                 } else {
-                    egui::Color32::from_rgb(140, 140, 150)
+                    ChipState::Off
                 };
-                let tts_col = if self.tts_loaded {
-                    egui::Color32::from_rgb(100, 220, 140)
-                } else if self.tts_loading {
-                    egui::Color32::from_rgb(220, 200, 100)
+                let voice_state = if self.tts_loading {
+                    ChipState::Loading
+                } else if self.tts_loaded {
+                    ChipState::Good
+                } else if self.tts_busy() {
+                    ChipState::Active
                 } else {
-                    egui::Color32::from_rgb(140, 140, 150)
+                    ChipState::Off
                 };
-                ui.colored_label(stt_col, self.stt_status_label());
-                ui.separator();
-                ui.colored_label(tts_col, self.tts_status_label());
-                ui.separator();
+                status_chip(ui, &self.dictation_chip(), dict_state);
+                status_chip(ui, &self.voice_chip(), voice_state);
                 let mic = truncate_display(&self.active_mic_label(), 28);
-                ui.label(format!("Mic: {mic}"))
-                    .on_hover_text(self.active_mic_label());
+                status_chip(ui, &format!("Mic: {mic}"), ChipState::Off);
                 if recording {
-                    // Pulsing red recording indicator (frame-driven via repaint).
                     let t = ctx.input(|i| i.time);
                     let pulse = 0.55 + 0.45 * ((t * 6.0).sin() * 0.5 + 0.5);
                     let r = (255.0 * pulse) as u8;
@@ -123,9 +123,9 @@ impl eframe::App for YapperApp {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 match self.main_tab {
-                    MainTab::Stt => {
+                    MainTab::Dictate => {
                         if recording {
-                            if danger_button(ui, "Stop & transcribe").clicked() {
+                            if danger_button(ui, "Stop and transcribe").clicked() {
                                 self.ptt_release();
                             }
                         } else {
@@ -142,6 +142,9 @@ impl eframe::App for YapperApp {
                             if rec.clicked() {
                                 self.ptt_press();
                             }
+                            if self.stt_loading {
+                                ui.weak("model loading…");
+                            }
                         }
                         if ui
                             .add_enabled(!self.stt_loading, egui::Button::new("Transcribe file…"))
@@ -156,7 +159,10 @@ impl eframe::App for YapperApp {
                             }
                         }
                         if ui
-                            .add_enabled(!self.transcript.is_empty(), egui::Button::new("Copy transcript"))
+                            .add_enabled(
+                                !self.transcript.is_empty(),
+                                egui::Button::new("Copy"),
+                            )
                             .clicked()
                         {
                             let _ = x11util::write_clipboard(&self.transcript);
@@ -165,12 +171,14 @@ impl eframe::App for YapperApp {
                             self.transcript.clear();
                         }
                     }
-                    MainTab::Tts => {
+                    MainTab::Speak => {
+                        let tts_busy = self.tts_busy();
                         let can_speak = !self.tts_text.trim().is_empty() && !self.tts_loading;
+                        let speak_lbl = speak_action_label(tts_busy);
                         let speak = ui.add_enabled(
                             can_speak,
                             egui::Button::new(
-                                egui::RichText::new("Speak")
+                                egui::RichText::new(speak_lbl)
                                     .color(egui::Color32::from_rgb(240, 248, 255))
                                     .strong(),
                             )
@@ -200,29 +208,40 @@ impl eframe::App for YapperApp {
                         if pause_btn.clicked() {
                             self.transport.toggle_pause();
                         }
-                        if danger_button(ui, "Stop").clicked() {
+                        let stop_enabled = can_stop_tts(tts_busy);
+                        if ui
+                            .add_enabled(stop_enabled, danger_button_widget("Stop"))
+                            .clicked()
+                        {
                             self.cancel_tts_pipeline();
                             self.status = "playback stopped".into();
                         }
-                        let can_replay = self.tts_last_full_path.as_ref().is_some_and(|p| p.is_file())
+                        let replay_exists = self
+                            .tts_last_full_path
+                            .as_ref()
+                            .is_some_and(|p| p.is_file())
                             || self
                                 .transport
                                 .machine()
                                 .last_path
                                 .as_ref()
                                 .is_some_and(|p| p.is_file());
+                        let can_replay = can_replay_tts(tts_busy, replay_exists);
                         if ui
                             .add_enabled(can_replay, egui::Button::new("Replay"))
                             .on_hover_text("Replay full last utterance")
                             .clicked()
                         {
                             match self.replay_last() {
-                                Ok(true) => self.status = "replaying...".into(),
+                                Ok(true) => self.status = "replaying…".into(),
                                 Ok(false) => self.status = "nothing to replay".into(),
                                 Err(e) => self.status = format!("replay error: {e:#}"),
                             }
                         }
-                        if ui.button("Read selection").clicked() {
+                        if ui
+                            .add_enabled(!self.tts_loading, egui::Button::new("Read selection"))
+                            .clicked()
+                        {
                             self.read_aloud();
                         }
                         if ui
@@ -288,19 +307,19 @@ impl eframe::App for YapperApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Tab bar
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
+                let labels = primary_tab_labels();
                 for (tab, label) in [
-                    (MainTab::Stt, "  STT  "),
-                    (MainTab::Tts, "  TTS  "),
-                    (MainTab::Settings, "  Settings  "),
+                    (MainTab::Dictate, labels[0]),
+                    (MainTab::Speak, labels[1]),
+                    (MainTab::Settings, labels[2]),
                 ] {
                     let selected = self.main_tab == tab;
                     let text = if selected {
-                        egui::RichText::new(label).strong()
+                        egui::RichText::new(format!("  {label}  ")).strong()
                     } else {
-                        egui::RichText::new(label)
+                        egui::RichText::new(format!("  {label}  "))
                     };
                     let btn = egui::Button::new(text).fill(if selected {
                         egui::Color32::from_rgb(50, 90, 150)
@@ -312,13 +331,11 @@ impl eframe::App for YapperApp {
                     }
                 }
             });
-            ui.add_space(6.0);
-            ui.separator();
+            ui.add_space(8.0);
 
-            // Settings may scroll; STT/TTS give the editor the remaining height.
             match self.main_tab {
-                MainTab::Stt => self.ui_tab_stt(ui),
-                MainTab::Tts => self.ui_tab_tts(ui),
+                MainTab::Dictate => self.ui_tab_dictate(ui),
+                MainTab::Speak => self.ui_tab_speak(ui),
                 MainTab::Settings => {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
@@ -332,15 +349,33 @@ impl eframe::App for YapperApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Only reached on real process exit (hard quit or unexpected teardown).
         self.discard_all_tts_audio();
+        let _ = self.jobs.kill_tts_now();
         self.jobs.send(super::messages::JobCmd::UnloadAll);
         self.jobs.send(super::messages::JobCmd::Shutdown);
         if let Some(session) = self.recording.take() {
             let _ = stop_recording(session);
         }
-        // Drop hotkeys so X11 grabs release before process death.
         self.hotkeys = None;
     }
 }
 
+/// Danger-styled button that returns a Widget so it can be nested in add_enabled.
+fn danger_button_widget(label: &str) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(label.to_owned()).strong())
+        .fill(egui::Color32::from_rgb(160, 50, 50))
+        .min_size(egui::vec2(96.0, 28.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ui::primary_tab_labels;
+
+    #[test]
+    fn frame_tabs_match_primary_labels() {
+        let tabs = primary_tab_labels();
+        assert_eq!(tabs[0], "Dictate");
+        assert_eq!(tabs[1], "Speak");
+        assert_eq!(tabs[2], "Settings");
+    }
+}

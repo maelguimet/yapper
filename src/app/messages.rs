@@ -34,6 +34,8 @@ pub enum JobCmd {
     },
     /// Kill TTS worker mid-generate (Stop / cancel). Next synth restarts it.
     CancelTtsWorker,
+    /// Lightweight tone list (no model load required if worker can list offline).
+    ListTones,
     Shutdown,
 }
 
@@ -81,6 +83,10 @@ pub enum AppMsg {
         stt_model: Option<String>,
         tts_loaded: bool,
         tts_model: Option<String>,
+    },
+    /// Async tone list refresh (fallback tones used until this arrives).
+    TonesListed {
+        tones: Vec<String>,
     },
 }
 

@@ -35,6 +35,8 @@ pub struct TtsController {
     /// Paths produced by the current job (for full-utterance concat).
     pub chunk_paths: Vec<PathBuf>,
     pub finished: bool,
+    /// Index of the chunk currently handed to the transport (for N/M chrome).
+    pub playing_index: Option<usize>,
 }
 
 impl TtsController {
@@ -61,6 +63,7 @@ impl TtsController {
         self.synth_in_flight = false;
         self.chunk_paths.clear();
         self.finished = false;
+        self.playing_index = None;
         id
     }
 
@@ -73,6 +76,7 @@ impl TtsController {
         self.synth_in_flight = false;
         self.total = 0;
         self.finished = true;
+        self.playing_index = None;
         // Keep chunk_paths for possible partial replay handled by caller.
     }
 
@@ -152,7 +156,9 @@ impl TtsController {
     }
 
     pub fn pop_ready(&mut self) -> Option<ReadyChunk> {
-        self.ready.pop_front()
+        let chunk = self.ready.pop_front()?;
+        self.playing_index = Some(chunk.index);
+        Some(chunk)
     }
 
     pub fn has_work(&self) -> bool {
@@ -166,15 +172,16 @@ impl TtsController {
         }
     }
 
-    /// Progress label: whole-utterance when possible.
+    /// Progress label: sentence N/M (playing) or synthesized count.
     pub fn progress_label(&self) -> String {
         if self.total == 0 {
             return String::new();
         }
-        let done = self.total.saturating_sub(self.pending.len() + self.ready.len());
-        // "done" here is chunks fully handed off from pending; adjust for ready still waiting.
+        if let Some(idx) = self.playing_index {
+            return format!("{}/{}", idx + 1, self.total);
+        }
         let synthesized = self.total.saturating_sub(self.pending.len());
-        let playing_hint = if self.ready.is_empty() {
+        if self.ready.is_empty() {
             format!("{synthesized}/{}", self.total)
         } else {
             format!(
@@ -183,9 +190,7 @@ impl TtsController {
                 self.total,
                 self.ready.len()
             )
-        };
-        let _ = done;
-        playing_hint
+        }
     }
 }
 

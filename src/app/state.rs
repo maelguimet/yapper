@@ -1,6 +1,7 @@
 //! YapperApp state construction and status labels.
 
 use super::jobs::JobHub;
+use super::messages::JobCmd;
 use super::tts_controller::TtsController;
 use super::{HotkeyCaptureField, MainTab};
 use crate::audio::{
@@ -11,10 +12,15 @@ use crate::hotkeys::HotkeyHub;
 use crate::lifecycle::ExitPromptState;
 use crate::transport::AudioTransport;
 use crate::tray::TrayHandle;
-use crate::ui::load_status_label;
-use crate::workers::{resolve_python_bin, resolve_python_root, WorkerManager};
+use crate::ui::{
+    dictation_chip_label, fallback_tones, load_status_label, stt_ready_for_selected, voice_chip_label,
+};
+use crate::workers::{resolve_python_bin, resolve_python_root};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Backoff after a failed config save so we do not spam persist every frame.
+const AUTOSAVE_FAIL_BACKOFF: Duration = Duration::from_secs(30);
 
 pub struct YapperApp {
     pub(crate) cfg: Config,
@@ -66,6 +72,8 @@ pub struct YapperApp {
     pub(crate) theme_applied: bool,
     /// Snapshot of work-tab prefs for autosave dirty detection.
     pub(crate) last_saved_prefs: PrefsSnapshot,
+    /// When set, autosave is throttled until this instant after a persist failure.
+    pub(crate) autosave_retry_after: Option<Instant>,
 }
 
 /// Work-tab preferences that should autosave (hotkeys still need Apply).
@@ -81,27 +89,17 @@ pub struct PrefsSnapshot {
 }
 
 impl YapperApp {
+    /// Construct app state. Must not spawn Python workers or block on tone IPC.
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut cfg = Config::load_or_default().unwrap_or_default();
         cfg.paths.python_root = resolve_python_root(&cfg).to_string_lossy().into();
         cfg.paths.python_bin = resolve_python_bin(&cfg);
 
-        // One-shot tone list (no model load); job hub owns workers afterwards.
-        let tones = {
-            let mut probe = WorkerManager::new(cfg.clone());
-            let t = probe.list_tones().unwrap_or_else(|_| {
-                vec![
-                    "neutral".into(),
-                    "calm".into(),
-                    "excited".into(),
-                    "serious".into(),
-                ]
-            });
-            probe.shutdown_all();
-            t
-        };
+        // Immediate fallback tones — async ListTones refreshes in background.
+        let tones = fallback_tones();
 
         let jobs = JobHub::start(cfg.clone());
+        jobs.send(JobCmd::ListTones);
 
         let (hotkeys, hotkey_error) =
             match HotkeyHub::register(&cfg.hotkeys.read_aloud, &cfg.hotkeys.push_to_talk) {
@@ -172,12 +170,21 @@ impl YapperApp {
             mic_list_error: None,
             mic_source,
             record_level: 0.0,
-            main_tab: MainTab::Stt,
+            main_tab: MainTab::Dictate,
             theme_applied: false,
             last_saved_prefs,
+            autosave_retry_after: None,
         };
         app.refresh_mic_sources();
         app
+    }
+
+    pub(crate) fn stt_ready_for_selected_model(&self) -> bool {
+        stt_ready_for_selected(
+            self.stt_loaded,
+            self.stt_model_id.as_deref(),
+            self.stt_model.as_str(),
+        )
     }
 
     pub(crate) fn stt_status_label(&self) -> String {
@@ -192,6 +199,36 @@ impl YapperApp {
             return "TTS … loading".into();
         }
         load_status_label("TTS", self.tts_loaded, self.tts_model_id.as_deref())
+    }
+
+    pub(crate) fn dictation_chip(&self) -> String {
+        dictation_chip_label(
+            self.stt_loading,
+            self.stt_loaded,
+            self.stt_model_id.as_deref(),
+            self.stt_model.as_str(),
+        )
+    }
+
+    pub(crate) fn voice_chip(&self) -> String {
+        voice_chip_label(
+            self.tts_loading,
+            self.tts_loaded,
+            self.tts_model_id.as_deref(),
+        )
+    }
+
+    /// True when TTS synth/playback should be treated as busy (Stop/Restart).
+    pub(crate) fn tts_busy(&self) -> bool {
+        self.tts.active_job.is_some()
+            || self.tts.synth_in_flight
+            || self.pending_speak.is_some()
+            || matches!(
+                self.transport.status(),
+                crate::transport::TransportStatus::Playing
+                    | crate::transport::TransportStatus::Paused
+                    | crate::transport::TransportStatus::Buffering
+            )
     }
 
     pub(crate) fn refresh_mic_sources(&mut self) {
@@ -234,10 +271,15 @@ impl YapperApp {
         self.current_prefs() != self.last_saved_prefs
     }
 
-    /// Autosave low-risk work-tab prefs when dirty.
+    /// Autosave low-risk work-tab prefs when dirty (throttled after save failure).
     pub(crate) fn autosave_prefs_if_dirty(&mut self) {
         if !self.prefs_dirty() {
             return;
+        }
+        if let Some(until) = self.autosave_retry_after {
+            if Instant::now() < until {
+                return;
+            }
         }
         self.persist();
     }
@@ -257,10 +299,37 @@ impl YapperApp {
         match self.cfg.save_default_location() {
             Ok(()) => {
                 self.last_saved_prefs = self.current_prefs();
+                self.autosave_retry_after = None;
             }
             Err(e) => {
                 self.status = format!("config save failed: {e}");
+                self.autosave_retry_after = Some(Instant::now() + AUTOSAVE_FAIL_BACKOFF);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::stt_ready_for_selected;
+
+    #[test]
+    fn stt_selected_model_mismatch_not_ready() {
+        // Mirrors UI fields: loaded small, selected medium → must reload.
+        assert!(!stt_ready_for_selected(true, Some("small"), "medium"));
+        assert!(stt_ready_for_selected(true, Some("medium"), "medium"));
+    }
+
+    #[test]
+    fn fallback_tones_used_without_worker() {
+        let tones = fallback_tones();
+        assert!(!tones.is_empty());
+        assert!(tones.iter().any(|t| t == "neutral"));
+    }
+
+    #[test]
+    fn autosave_backoff_constant_is_positive() {
+        assert!(AUTOSAVE_FAIL_BACKOFF.as_secs() >= 5);
     }
 }

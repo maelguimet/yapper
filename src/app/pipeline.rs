@@ -9,6 +9,7 @@ use crate::textprep::sanitize_for_tts;
 use crate::transport::TransportStatus;
 use crate::ui::{
     chunk_paths_retained_for_replay, chunk_paths_to_remove, resolve_replay_path,
+    speak_restart_needs_oob_kill, transport_status_line,
 };
 use crate::wavutil::concat_wav_files;
 use crate::x11util::{self, ClipboardSel};
@@ -93,8 +94,9 @@ impl YapperApp {
         if self.stt_loading {
             return;
         }
+        // Always load the *selected* model (may differ from currently loaded).
         self.stt_loading = true;
-        self.status = format!("loading STT {}…", self.stt_model);
+        self.status = format!("loading dictation model {}…", self.stt_model);
         self.jobs.send(JobCmd::LoadStt {
             model: self.stt_model.clone(),
             device: "cuda".into(),
@@ -103,15 +105,18 @@ impl YapperApp {
 
     pub(crate) fn unload_stt(&mut self) {
         self.jobs.send(JobCmd::Unload { role: Role::Stt });
-        self.status = "unloading STT…".into();
+        self.status = "unloading dictation model…".into();
     }
 
     pub(crate) fn load_tts(&mut self) {
         if self.tts_loading {
             return;
         }
+        if self.tts_loaded && !self.tts_loading {
+            return;
+        }
         self.tts_loading = true;
-        self.status = "loading TTS…".into();
+        self.status = "loading voice model…".into();
         self.jobs.send(JobCmd::LoadTts {
             device: "cuda".into(),
         });
@@ -120,14 +125,15 @@ impl YapperApp {
     pub(crate) fn unload_tts(&mut self) {
         self.discard_all_tts_audio();
         self.jobs.send(JobCmd::Unload { role: Role::Tts });
-        self.status = "unloading TTS…".into();
+        self.status = "unloading voice model…".into();
     }
 
     pub(crate) fn do_transcribe_file(&mut self, path: PathBuf) {
-        if !self.stt_loaded {
+        // Honor Settings selector: if wrong size is loaded, reload first.
+        if !self.stt_ready_for_selected_model() {
             self.pending_transcribe = Some(path);
             self.load_stt();
-            self.status = "loading STT for transcription…".into();
+            self.status = format!("loading dictation model {}…", self.stt_model);
             return;
         }
         self.status = "transcribing…".into();
@@ -146,7 +152,7 @@ impl YapperApp {
         if !self.tts_loaded {
             self.pending_speak = Some(text);
             self.load_tts();
-            self.status = "loading TTS…".into();
+            self.status = "loading voice model…".into();
             return;
         }
         self.start_speak_job(text);
@@ -158,12 +164,15 @@ impl YapperApp {
         self.tts.cancel();
         self.transport.set_pending_queue(false);
         self.transport.stop();
-        if had_in_flight {
+        if speak_restart_needs_oob_kill(had_in_flight) {
+            // Same immediate path as Stop — do not queue Cancel behind blocking Synthesize.
+            let _ = self.jobs.kill_tts_now();
             self.jobs.send(JobCmd::CancelTtsWorker);
             self.tts_loaded = false;
             self.tts_model_id = None;
-            // Will need reload before synth — queue speak.
             self.pending_speak = Some(text);
+            self.status = "restarting voice…".into();
+            self.cleanup_chunk_temps_keeping_replay();
             self.load_tts();
             return;
         }
@@ -354,13 +363,26 @@ impl YapperApp {
                     Role::Stt => {
                         self.stt_loaded = false;
                         self.stt_model_id = None;
+                        self.stt_loading = false;
                     }
                     Role::Tts => {
                         self.tts_loaded = false;
                         self.tts_model_id = None;
+                        self.tts_loading = false;
                     }
                 }
-                self.status = format!("{role:?} {op} timed out: {error}");
+                self.status = format!("{role:?} {op}: {error}");
+            }
+            AppMsg::TonesListed { tones } => {
+                if !tones.is_empty() {
+                    self.tones = tones;
+                    // Keep current selection if still present; else first tone.
+                    if !self.tones.iter().any(|t| t == &self.tts_tone) {
+                        if let Some(first) = self.tones.first() {
+                            self.tts_tone = first.clone();
+                        }
+                    }
+                }
             }
         }
     }
@@ -395,18 +417,16 @@ impl YapperApp {
     }
 
     fn update_speak_status(&mut self) {
-        if self.tts.active_job.is_none() {
-            return;
-        }
-        let prog = self.tts.progress_label();
+        let transport_idle = matches!(self.transport.status(), TransportStatus::Idle);
         let time = self.transport.machine().format_time_label();
-        if self.tts.synth_in_flight {
-            self.status = format!("speaking {prog} · synth next · ({time})");
-        } else if !self.tts.ready.is_empty() || !self.tts.pending.is_empty() {
-            self.status = format!("speaking {prog} · ({time})");
-        } else {
-            self.status = format!("speaking ({time})");
-        }
+        self.status = transport_status_line(
+            self.tts.active_job.is_some(),
+            self.tts.playing_index,
+            self.tts.total,
+            transport_idle,
+            &time,
+            self.tts.synth_in_flight,
+        );
     }
 
     fn finalize_tts_job_if_done(&mut self) {
