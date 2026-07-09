@@ -130,3 +130,52 @@ def test_load_transcribe_unload_via_stdio(tmp_path: Path) -> None:
 
     SCRATCH.mkdir(parents=True, exist_ok=True)
     (SCRATCH / "stt-smoke-transcript.txt").write_text(text + "\n", encoding="utf-8")
+
+
+@pytest.mark.skipif(not _cuda_and_whisper_available(), reason="CUDA+whisper required")
+def test_stt_model_swap_small_medium_small_active_model() -> None:
+    """P1-G: selected model is the active one across small → medium → small.
+
+    One worker process; status.model matches each load; no dual residency
+    (reload drops previous weights). File transcribe yields non-empty text.
+    """
+    SCRATCH.mkdir(parents=True, exist_ok=True)
+    fixture = SCRATCH / "fixtures" / "speech_en_swap.wav"
+    _make_speech_wav(fixture)
+    download_root = Path.home() / ".local" / "share" / "yapper" / "models" / "whisper"
+    download_root.mkdir(parents=True, exist_ok=True)
+
+    from yapper_common.ipc import Request
+    from yapper_stt.worker import SttWorker
+
+    worker = SttWorker(download_root=download_root)
+    transcripts: list[str] = []
+    try:
+        for model in ("small", "medium", "small"):
+            load = worker.handle(
+                Request(id=f"load-{model}", cmd="load", params={"model": model, "device": "cuda"})
+            )
+            assert load.ok, load
+            status = worker.handle(Request(id=f"st-{model}", cmd="status"))
+            assert status.ok and status.result.get("loaded") is True
+            assert status.result.get("model") == model, status.result
+            tx = worker.handle(
+                Request(
+                    id=f"tx-{model}",
+                    cmd="transcribe",
+                    params={"path": str(fixture), "language": "en"},
+                )
+            )
+            assert tx.ok, tx
+            text = str(tx.result.get("text", "")).strip()
+            assert text, f"empty transcript for {model}"
+            transcripts.append(f"{model}: {text}")
+        final = worker.handle(Request(id="final", cmd="status"))
+        assert final.result.get("model") == "small"
+        assert final.result.get("loaded") is True
+    finally:
+        worker.handle(Request(id="unload", cmd="unload"))
+
+    (SCRATCH / "stt-swap-transcripts.txt").write_text(
+        "\n".join(transcripts) + "\n", encoding="utf-8"
+    )
