@@ -199,6 +199,45 @@ else
   bad "expected install.sh functions after source"
 fi
 
+# --- dry-run must not write user autostart (shipped prompt_autostart) -------
+
+echo "== dry-run autostart=user does not mutate =="
+# Isolate HOME so a bug cannot touch the real autostart path.
+tmp_home="$(mktemp -d "${TMPDIR:-/tmp}/yapper-autostart-test.XXXXXX")"
+HOME_SAVE="$HOME"
+XDG_C_SAVE="${XDG_CONFIG_HOME:-}"
+XDG_D_SAVE="${XDG_DATA_HOME:-}"
+DRY_RUN_SAVE="$DRY_RUN"
+YAS_SAVE="${YAPPER_AUTOSTART:-}"
+export HOME="$tmp_home"
+export XDG_CONFIG_HOME="$tmp_home/.config"
+export XDG_DATA_HOME="$tmp_home/.local/share"
+DRY_RUN=1
+YAPPER_AUTOSTART=user
+set +e
+out="$(prompt_autostart 2>&1)"
+rc=$?
+set -e
+target="$tmp_home/.config/autostart/yapper.desktop"
+if [[ -e "$target" ]]; then
+  bad "dry-run wrote user autostart at $target"
+else
+  ok "dry-run did not create user autostart file"
+fi
+assert_contains "dry-run logs user autostart plan" "$out" "[dry-run]"
+assert_contains "dry-run mentions autostart path" "$out" "autostart"
+if [[ "$rc" -ne 0 ]]; then
+  bad "prompt_autostart dry-run should exit 0 (rc=$rc)"
+else
+  ok "prompt_autostart dry-run exits 0"
+fi
+export HOME="$HOME_SAVE"
+if [[ -n "$XDG_C_SAVE" ]]; then export XDG_CONFIG_HOME="$XDG_C_SAVE"; else unset XDG_CONFIG_HOME; fi
+if [[ -n "$XDG_D_SAVE" ]]; then export XDG_DATA_HOME="$XDG_D_SAVE"; else unset XDG_DATA_HOME; fi
+DRY_RUN="$DRY_RUN_SAVE"
+if [[ -n "$YAS_SAVE" ]]; then YAPPER_AUTOSTART="$YAS_SAVE"; else unset YAPPER_AUTOSTART; fi
+rm -rf "$tmp_home"
+
 # --- summary ----------------------------------------------------------------
 
 echo

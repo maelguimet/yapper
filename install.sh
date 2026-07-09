@@ -313,6 +313,10 @@ prompt_autostart() {
   case "$mode" in
     user)
       local ad="$HOME/.config/autostart"
+      if [[ "$DRY_RUN" == "1" ]]; then
+        log "[dry-run] write $ad/yapper.desktop (user autostart)"
+        return
+      fi
       mkdir -p "$ad"
       cp "${XDG_DATA_HOME:-$HOME/.local/share}/applications/yapper.desktop" "$ad/yapper.desktop"
       log "autostart user: $ad/yapper.desktop"
