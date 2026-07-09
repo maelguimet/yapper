@@ -5,7 +5,7 @@ use super::*;
 use crate::mpv_backend::{wav_duration_secs, which_bin};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[test]
 fn transport_replay_false_when_file_missing() {
@@ -209,6 +209,72 @@ fn enqueue_full_playlist_then_replay_full_concat() {
     assert!(
         play_dur + 0.05 >= sum * 0.9,
         "replay duration {play_dur} should cover full utterance ~{sum}"
+    );
+    t.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// After playlist advances past a short chunk, Seek must use the *current*
+/// file duration (not the first WAV). Regression for continuous append path.
+#[test]
+fn multi_chunk_seek_uses_current_item_duration_after_advance() {
+    if !which_bin("mpv") {
+        eprintln!("skip: mpv not installed");
+        return;
+    }
+    let dir = scratch_dir();
+    let a = dir.join("a-short.wav");
+    let b = dir.join("b-long.wav");
+    write_silence_wav(&a, 0.40);
+    write_silence_wav(&b, 2.00);
+    let a_dur = wav_duration_secs(&a).unwrap();
+    let b_dur = wav_duration_secs(&b).unwrap();
+    assert!(a_dur < 0.55, "a_dur={a_dur}");
+    assert!(b_dur > 1.8, "b_dur={b_dur}");
+
+    let mut t = AudioTransport::default();
+    t.set_pending_queue(true);
+    t.enqueue_or_play(&a).unwrap();
+    t.enqueue_or_play(&b).unwrap();
+    assert_eq!(t.files_on_session(), 2);
+    assert_eq!(t.status(), TransportStatus::Playing);
+
+    // Wait until mpv has advanced onto B (duration ~2s, not stuck on A ~0.4s).
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    let mut saw_b = false;
+    while std::time::Instant::now() < deadline {
+        t.tick();
+        if t.machine().duration_secs > 1.5 {
+            saw_b = true;
+            break;
+        }
+        if t.status() != TransportStatus::Playing && t.status() != TransportStatus::Paused {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    assert!(
+        saw_b,
+        "expected duration to refresh to chunk B (~2s); got duration={} status={:?}",
+        t.machine().duration_secs,
+        t.status()
+    );
+
+    // Seek into B; must not clamp to A's ~0.4s bound.
+    t.seek_secs(1.5);
+    let pos = t.machine().position_secs;
+    assert!(
+        pos > 1.0,
+        "seek_secs(1.5) after advance must land in B, not clamp to A; pos={pos} dur={}",
+        t.machine().duration_secs
+    );
+    assert!(
+        (pos - 1.5).abs() < 0.35,
+        "seek position should be near 1.5s in B; pos={pos}"
+    );
+    eprintln!(
+        "seek-after-advance ok: pos={pos} duration={} (A was {a_dur})",
+        t.machine().duration_secs
     );
     t.stop();
     let _ = std::fs::remove_dir_all(&dir);

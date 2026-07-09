@@ -284,12 +284,13 @@ impl AudioTransport {
                     if let Some(pos) = b.time_pos() {
                         self.machine.set_position(pos);
                     }
-                    if !self.duration_known {
-                        if let Some(dur) = b.duration() {
-                            if dur > 0.0 {
-                                self.machine.duration_secs = dur;
-                                self.duration_known = true;
-                            }
+                    // Always refresh duration from mpv. With playlist-append the
+                    // current item changes without a new process; caching only the
+                    // first WAV's duration would clamp Seek to chunk-0 bounds.
+                    if let Some(dur) = b.duration() {
+                        if dur > 0.0 {
+                            self.machine.duration_secs = dur;
+                            self.duration_known = true;
                         }
                     }
                 }
