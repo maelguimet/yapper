@@ -88,7 +88,7 @@ pub fn split_for_tts_with_limit(text: &str, max_chars: usize) -> Vec<String> {
     if !buf.trim().is_empty() {
         push_segment(&mut segments, &buf, max_chars);
     }
-    ensure_nonfinal_terminal_punct(&mut segments);
+    ensure_nonfinal_terminal_punct(&mut segments, max_chars);
     segments
 }
 
@@ -98,7 +98,8 @@ fn is_clause_break(ch: char) -> bool {
 
 /// Append a light period to non-final segments that lack terminal punctuation.
 /// Helps generative TTS treat hard-split mid-thought chunks as complete.
-fn ensure_nonfinal_terminal_punct(segments: &mut [String]) {
+/// Skips when the segment is already at `max_chars` so the limit stays hard.
+fn ensure_nonfinal_terminal_punct(segments: &mut [String], max_chars: usize) {
     if segments.len() < 2 {
         return;
     }
@@ -106,6 +107,9 @@ fn ensure_nonfinal_terminal_punct(segments: &mut [String]) {
     for seg in segments.iter_mut().take(last) {
         let trimmed = seg.trim_end();
         if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.chars().count() >= max_chars {
             continue;
         }
         let last_ch = trimmed.chars().last().unwrap_or(' ');
@@ -169,16 +173,23 @@ fn push_segment(out: &mut Vec<String>, raw: &str, max_chars: usize) {
         out.push(s.to_string());
         return;
     }
-    // Hard-split long segment on whitespace
+    // Hard-split long segment on whitespace; giant single tokens are char-chunked.
     let mut part = String::new();
     for word in s.split_whitespace() {
+        let word_len = word.chars().count();
+        if word_len > max_chars {
+            if !part.is_empty() {
+                out.push(std::mem::take(&mut part));
+            }
+            push_hard_split_token(out, word, max_chars);
+            continue;
+        }
         if part.is_empty() {
             part.push_str(word);
             continue;
         }
-        if part.chars().count() + 1 + word.chars().count() > max_chars {
-            out.push(part.clone());
-            part.clear();
+        if part.chars().count() + 1 + word_len > max_chars {
+            out.push(std::mem::take(&mut part));
             part.push_str(word);
         } else {
             part.push(' ');
@@ -187,6 +198,15 @@ fn push_segment(out: &mut Vec<String>, raw: &str, max_chars: usize) {
     }
     if !part.is_empty() {
         out.push(part);
+    }
+}
+
+/// Split one oversize token into pieces of at most `max_chars` (Unicode scalars).
+fn push_hard_split_token(out: &mut Vec<String>, word: &str, max_chars: usize) {
+    let piece = max_chars.max(1);
+    let chars: Vec<char> = word.chars().collect();
+    for chunk in chars.chunks(piece) {
+        out.push(chunk.iter().collect());
     }
 }
 
@@ -299,5 +319,49 @@ mod tests {
         );
         let segs = split_for_tts_with_limit(&text, 100);
         assert!(segs.len() >= 2, "{segs:?}");
+    }
+
+    #[test]
+    fn oversize_single_token_hard_split_under_limit() {
+        let blob: String = std::iter::repeat('x').take(1000).collect();
+        let max = 80;
+        let segs = split_for_tts_with_limit(&blob, max);
+        assert!(segs.len() > 1, "must hard-split: {segs:?}");
+        for s in &segs {
+            assert!(
+                s.chars().count() <= max,
+                "seg len {} > {max}: {:?}",
+                s.chars().count(),
+                s
+            );
+        }
+        let rejoined: String = segs.join("");
+        // Non-final hard-split may append a light period; strip for body check.
+        let body: String = rejoined.chars().filter(|c| *c == 'x').collect();
+        assert_eq!(body.len(), 1000);
+    }
+
+    #[test]
+    fn sanitize_then_split_keeps_segments_under_chunk_limit() {
+        use crate::textprep::sanitize_for_tts;
+        let blob: String = std::iter::repeat('z').take(1000).collect();
+        let messy = format!(
+            "Read https://very.long.example.com/path/{} and #spam {}",
+            "p".repeat(200),
+            blob
+        );
+        let cleaned = sanitize_for_tts(&messy);
+        let max = DEFAULT_MAX_CHUNK_CHARS;
+        let segs = split_for_tts_with_limit(&cleaned, max);
+        assert!(!segs.is_empty());
+        for s in &segs {
+            assert!(
+                s.chars().count() <= max,
+                "seg len {} > {max}: {:?}",
+                s.chars().count(),
+                &s[..s.len().min(40)]
+            );
+        }
+        assert!(!cleaned.contains("http"), "URL stripped in sanitize: {cleaned}");
     }
 }

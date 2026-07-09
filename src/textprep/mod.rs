@@ -1,4 +1,12 @@
 //! Sanitize and normalize free-form text before TTS (social/X paste, acronyms).
+//!
+//! Rules (keep aligned with `python/yapper_tts/sanitize.py` + `fixtures/sanitize/`):
+//! - Replace `http(s)://…` and `www.…` with the short speakable placeholder `link`.
+//! - Drop standalone `#hashtag` tokens and `@handle` lines/tokens (prose kept).
+//! - Cap unbroken tokens at [`MAX_UNBROKEN_TOKEN_CHARS`] by inserting spaces
+//!   (segmenter also hard-splits anything still over the TTS chunk limit).
+//! - Expand TTS/STT/GPT (any case) and uppercase-only `EU`; leave French `eu`.
+//! - Keep FR letters/accents; strip emoji and other unsupported glyphs.
 
 /// Exact B21 fixture (social/X paste that must not crash the pipeline).
 pub const B21_SOCIAL_FIXTURE: &str = "\
@@ -13,8 +21,16 @@ The permanent EUnderclass is already here 🇪🇺";
 /// B25 pronunciation fixture.
 pub const B25_TTS_FIXTURE: &str = "This is a test. Does the TTS work?";
 
-/// Sanitize messy social/X text for Chatterbox: strip handles, drop unsupported
-/// glyphs, collapse blank lines, expand a few acronyms so they are not misread.
+/// Max length (Unicode scalars) of one unbroken token after sanitize.
+/// Longer runs (base64, minified code, leftover URLs) are space-split here.
+pub const MAX_UNBROKEN_TOKEN_CHARS: usize = 80;
+
+/// Short speakable stand-in for stripped URLs.
+const URL_PLACEHOLDER: &str = "link";
+
+/// Sanitize messy social/X text for Chatterbox: strip handles/URLs/hashtags,
+/// drop unsupported glyphs, collapse blank lines, cap giant tokens, expand a
+/// few acronyms so they are not misread.
 ///
 /// Never panics; empty input → empty output.
 pub fn sanitize_for_tts(text: &str) -> String {
@@ -36,6 +52,17 @@ fn sanitize_line(line: &str) -> String {
     if is_handle_only(trimmed) {
         return String::new();
     }
+    let mut s = strip_inline_handles(trimmed);
+    s = replace_urls(&s);
+    s = s.chars().filter(|c| keep_char(*c)).collect();
+    let s = collapse_ws(&s);
+    let s = drop_standalone_hashtags(&s);
+    let s = cap_unbroken_tokens(&s, MAX_UNBROKEN_TOKEN_CHARS);
+    expand_acronyms(&s)
+}
+
+/// Drop `@name` tokens; a bare `@` becomes spoken "at".
+fn strip_inline_handles(trimmed: &str) -> String {
     let mut s = String::with_capacity(trimmed.len());
     let mut chars = trimmed.chars().peekable();
     while let Some(c) = chars.next() {
@@ -54,12 +81,107 @@ fn sanitize_line(line: &str) -> String {
             }
             continue;
         }
-        if keep_char(c) {
-            s.push(c);
+        s.push(c);
+    }
+    s
+}
+
+/// Replace URL-like runs with [`URL_PLACEHOLDER`] so they are not spoken as garbage.
+fn replace_urls(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        if let Some(end) = match_url_at(&chars, i) {
+            out.push_str(URL_PLACEHOLDER);
+            i = end;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn match_url_at(chars: &[char], i: usize) -> Option<usize> {
+    let scheme_len = if starts_with_ci(chars, i, "https://") {
+        8
+    } else if starts_with_ci(chars, i, "http://") {
+        7
+    } else if starts_with_ci(chars, i, "www.") {
+        4
+    } else {
+        return None;
+    };
+    let mut j = i + scheme_len;
+    if j >= chars.len() || chars[j].is_whitespace() {
+        return None;
+    }
+    while j < chars.len() && !chars[j].is_whitespace() {
+        j += 1;
+    }
+    // Leave sentence punctuation outside the URL match.
+    while j > i + scheme_len {
+        let prev = chars[j - 1];
+        if matches!(prev, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '\'' | '"' | '»') {
+            j -= 1;
+        } else {
+            break;
         }
     }
-    let s = collapse_ws(&s);
-    expand_acronyms(&s)
+    if j <= i + scheme_len {
+        return None;
+    }
+    Some(j)
+}
+
+fn starts_with_ci(chars: &[char], i: usize, prefix: &str) -> bool {
+    let p: Vec<char> = prefix.chars().collect();
+    if i + p.len() > chars.len() {
+        return false;
+    }
+    p.iter()
+        .enumerate()
+        .all(|(k, &want)| chars[i + k].eq_ignore_ascii_case(&want))
+}
+
+/// Drop whitespace-separated tokens that are pure social hashtags (`#tag`).
+fn drop_standalone_hashtags(s: &str) -> String {
+    s.split_whitespace()
+        .filter(|tok| !is_hashtag_token(tok))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_hashtag_token(tok: &str) -> bool {
+    let mut it = tok.chars();
+    match it.next() {
+        Some('#') => {
+            let rest: String = it.collect();
+            !rest.is_empty()
+                && rest
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        _ => false,
+    }
+}
+
+/// Space-split any token longer than `max_len` so the segmenter never sees a giant blob.
+fn cap_unbroken_tokens(s: &str, max_len: usize) -> String {
+    let max_len = max_len.max(8);
+    let mut parts: Vec<String> = Vec::new();
+    for token in s.split_whitespace() {
+        let chars: Vec<char> = token.chars().collect();
+        if chars.len() <= max_len {
+            parts.push(token.to_string());
+            continue;
+        }
+        for chunk in chars.chunks(max_len) {
+            parts.push(chunk.iter().collect());
+        }
+    }
+    parts.join(" ")
 }
 
 fn is_handle_only(s: &str) -> bool {
@@ -190,132 +312,6 @@ pub fn regression_fixtures() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn b21_social_does_not_panic_and_is_speakable() {
-        let out = sanitize_for_tts(B21_SOCIAL_FIXTURE);
-        assert!(!out.is_empty(), "sanitized text should remain speakable");
-        assert!(!out.contains('@'), "handles stripped: {out}");
-        assert!(!out.contains('🫡'), "emoji stripped: {out}");
-        assert!(
-            out.to_ascii_lowercase().contains("doesn")
-                || out.to_ascii_lowercase().contains("work"),
-            "{out}"
-        );
-        assert!(out.contains("G P T") || out.to_ascii_lowercase().contains("g p t"), "{out}");
-        assert_eq!(sanitize_for_tts(""), "");
-        assert_eq!(sanitize_for_tts("   \n\n  "), "");
-    }
-
-    #[test]
-    fn b25_tts_expanded_not_vulgar() {
-        let out = sanitize_for_tts(B25_TTS_FIXTURE);
-        assert!(
-            out.contains("T T S"),
-            "TTS must be spelled out for pronunciation: {out}"
-        );
-        assert!(
-            !out.split_whitespace().any(|w| w.eq_ignore_ascii_case("TTS")),
-            "raw TTS token must not remain: {out}"
-        );
-        assert!(!out.to_ascii_lowercase().contains("river"));
-    }
-
-    #[test]
-    fn sticky_load_policy_default() {
-        assert!(!should_unload_after_successful_job());
-    }
-
-    #[test]
-    fn strips_handle_only_lines() {
-        let out = sanitize_for_tts("@illyism\nHello there");
-        assert_eq!(out, "Hello there");
-    }
-
-    #[test]
-    fn keeps_french_letters() {
-        // Real do_speak path: sanitize must preserve FR accents, not UTF-8 mojibake.
-        let out = sanitize_for_tts("Café déjà vu — très bien. ça va?");
-        assert!(
-            out.contains("Café"),
-            "must keep intact Café (not CafÃ©), got {out:?}"
-        );
-        assert!(out.contains('é'), "must keep é, got {out:?}");
-        assert!(out.contains('ç'), "must keep ç, got {out:?}");
-        assert!(out.contains("déjà") || out.contains("deja"), "got {out:?}");
-        assert!(out.contains("bien"), "{out}");
-        // Mojibake fingerprints from byte-as-char expansion (pre-fix bug).
-        assert!(
-            !out.contains('Ã'),
-            "UTF-8 mojibake (Ã) must not appear: {out:?}"
-        );
-        assert!(
-            !out.contains("CafÃ"),
-            "classic Café→CafÃ© corruption: {out:?}"
-        );
-    }
-
-    #[test]
-    fn acronym_expand_does_not_corrupt_surrounding_unicode() {
-        // Regression: expand_acronyms used to walk bytes and cast to char.
-        let out = sanitize_for_tts("Café TTS déjà");
-        assert!(out.contains("Café"), "got {out:?}");
-        assert!(out.contains("T T S"), "got {out:?}");
-        assert!(out.contains('é'), "got {out:?}");
-        assert!(!out.contains('Ã'), "got {out:?}");
-        // Mixed: FR word + EU acronym boundary
-        let out2 = sanitize_for_tts("français EU ok");
-        assert!(out2.contains('ç') || out2.contains("fran"), "got {out2:?}");
-        assert!(out2.contains("E U"), "got {out2:?}");
-        assert!(!out2.contains('Ã'), "got {out2:?}");
-    }
-
-    #[test]
-    fn french_lowercase_eu_not_expanded() {
-        // French "eu" (past of avoir) must not become "E U".
-        let out = sanitize_for_tts("j'ai eu peur.");
-        assert_eq!(out, "j'ai eu peur.");
-        assert!(!out.contains("E U"), "lowercase eu must stay: {out}");
-        let out2 = sanitize_for_tts("Bonjour. J'ai eu peur, mais maintenant ça va.");
-        assert!(out2.contains("eu"), "got {out2:?}");
-        assert!(!out2.contains("E U"), "got {out2:?}");
-    }
-
-    #[test]
-    fn uppercase_eu_still_expanded() {
-        let out = sanitize_for_tts("EU rules");
-        assert!(out.contains("E U"), "got {out:?}");
-        assert!(!out.split_whitespace().any(|w| w == "EU"), "got {out:?}");
-    }
-
-    #[test]
-    fn lowercase_tts_stt_gpt_still_expanded() {
-        let out = sanitize_for_tts("try tts and stt with gpt");
-        assert!(out.contains("T T S"), "got {out:?}");
-        assert!(out.contains("S T T"), "got {out:?}");
-        assert!(out.contains("G P T"), "got {out:?}");
-    }
-
-    #[test]
-    fn golden_sanitize_fixtures_match_expected() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/sanitize");
-        let cases = std::fs::read_to_string(root.join("cases.txt")).expect("cases.txt");
-        let expected = std::fs::read_to_string(root.join("expected_rust.txt"))
-            .or_else(|_| std::fs::read_to_string(root.join("expected.txt")))
-            .expect("expected fixtures");
-        let inputs: Vec<&str> = cases.split("\n---\n").collect();
-        let wants: Vec<&str> = expected.split("\n---\n").collect();
-        assert_eq!(inputs.len(), wants.len(), "fixture count mismatch");
-        for (raw, want) in inputs.iter().zip(wants.iter()) {
-            assert_eq!(
-                sanitize_for_tts(raw),
-                want.trim(),
-                "input={raw:?}"
-            );
-        }
-    }
-}
+mod tests;
