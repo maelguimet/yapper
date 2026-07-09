@@ -1,11 +1,13 @@
-//! Spawn/manage STT & TTS workers with dual-model LRU policy.
+//! Spawn/manage STT & TTS workers with dual-model LRU policy and timeouts.
 
 use crate::config::Config;
+use crate::timeouts;
 use crate::ipc::{params, WorkerClient};
 use crate::policy::{DualModelPolicy, Role};
 use anyhow::{anyhow, bail, Result};
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub struct WorkerManager {
     cfg: Config,
@@ -63,9 +65,38 @@ impl WorkerManager {
         }
     }
 
+    /// Drop worker process immediately (cancel mid-generate / recovery after hang).
+    pub fn kill_worker(&mut self, role: Role) {
+        match role {
+            Role::Stt => {
+                if let Some(mut c) = self.stt.take() {
+                    c.kill_now();
+                }
+                self.policy.mark_unloaded(Role::Stt);
+            }
+            Role::Tts => {
+                if let Some(mut c) = self.tts.take() {
+                    c.kill_now();
+                }
+                self.policy.mark_unloaded(Role::Tts);
+            }
+        }
+    }
+
     pub fn unload(&mut self, role: Role) -> Result<()> {
+        self.unload_timeout(role, timeouts::unload())
+    }
+
+    pub fn unload_timeout(&mut self, role: Role, timeout: Duration) -> Result<()> {
         if let Ok(c) = self.client_mut(role) {
-            let resp = c.request("unload", Default::default())?;
+            let resp = match c.request_timeout("unload", Default::default(), timeout) {
+                Ok(r) => r,
+                Err(e) => {
+                    // Hang on unload → hard kill and clear policy.
+                    self.kill_worker(role);
+                    return Err(e);
+                }
+            };
             if !resp.ok {
                 let msg = resp
                     .error
@@ -87,40 +118,60 @@ impl WorkerManager {
 
     /// Load model for role; on OOM unload peer and retry once.
     pub fn load(&mut self, role: Role, model: &str, device: &str) -> Result<()> {
+        let timeout = load_timeout(role, model);
+        self.load_timeout(role, model, device, timeout)
+    }
+
+    pub fn load_timeout(
+        &mut self,
+        role: Role,
+        model: &str,
+        device: &str,
+        timeout: Duration,
+    ) -> Result<()> {
         if self.policy.already_loaded(role, model) {
             self.policy.touch(role);
             return Ok(());
         }
-        // different model already loaded → unload first
         if self.policy.slot_loaded(role) {
-            self.unload(role)?;
+            self.unload_timeout(role, timeouts::unload())?;
         }
         self.ensure_worker(role)?;
-        match self.try_load(role, model, device) {
+        match self.try_load(role, model, device, timeout) {
             Ok(()) => Ok(()),
             Err(e) if is_oom_error(&e) => {
-                // Prefer explicit peer of the role being loaded; fall back to LRU.
                 let victim = self
                     .policy
                     .peer_to_unload_on_pressure(role)
                     .or_else(|| self.policy.lru_to_unload());
                 if let Some(peer) = victim {
                     if peer != role {
-                        self.unload(peer)?;
-                        return self.try_load(role, model, device);
+                        self.unload_timeout(peer, timeouts::unload())?;
+                        return self.try_load(role, model, device, timeout);
                     }
                 }
+                Err(e)
+            }
+            Err(e) if is_timeout_error(&e) => {
+                self.kill_worker(role);
                 Err(e)
             }
             Err(e) => Err(e),
         }
     }
 
-    fn try_load(&mut self, role: Role, model: &str, device: &str) -> Result<()> {
+    fn try_load(
+        &mut self,
+        role: Role,
+        model: &str,
+        device: &str,
+        timeout: Duration,
+    ) -> Result<()> {
         let c = self.client_mut(role)?;
-        let resp = c.request(
+        let resp = c.request_timeout(
             "load",
             params(&[("model", json!(model)), ("device", json!(device))]),
+            timeout,
         )?;
         if !resp.ok {
             let code = resp
@@ -143,15 +194,33 @@ impl WorkerManager {
     }
 
     pub fn transcribe(&mut self, path: &Path, language: &str) -> Result<String> {
+        self.transcribe_timeout(path, language, timeouts::stt_transcribe())
+    }
+
+    pub fn transcribe_timeout(
+        &mut self,
+        path: &Path,
+        language: &str,
+        timeout: Duration,
+    ) -> Result<String> {
         self.policy.touch(Role::Stt);
         let c = self.client_mut(Role::Stt)?;
-        let resp = c.request(
+        let resp = match c.request_timeout(
             "transcribe",
             params(&[
                 ("path", json!(path.to_string_lossy())),
                 ("language", json!(language)),
             ]),
-        )?;
+            timeout,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                if is_timeout_error(&e) {
+                    self.kill_worker(Role::Stt);
+                }
+                return Err(e);
+            }
+        };
         if !resp.ok {
             bail!(
                 "{}",
@@ -161,7 +230,6 @@ impl WorkerManager {
                     .unwrap_or("transcribe failed")
             );
         }
-        // Sticky warm (B24): success never unloads.
         debug_assert!(!self.policy.should_unload_after_job());
         Ok(resp
             .result
@@ -174,7 +242,7 @@ impl WorkerManager {
     pub fn list_tones(&mut self) -> Result<Vec<String>> {
         self.ensure_worker(Role::Tts)?;
         let c = self.client_mut(Role::Tts)?;
-        let resp = c.request("list_tones", Default::default())?;
+        let resp = c.request_timeout("list_tones", Default::default(), Duration::from_secs(15))?;
         if !resp.ok {
             bail!("list_tones failed");
         }
@@ -199,9 +267,22 @@ impl WorkerManager {
         voice: &str,
         out_path: &Path,
     ) -> Result<PathBuf> {
+        let timeout = timeouts::tts_synth_chunk(text.chars().count());
+        self.synthesize_timeout(text, language, tone, voice, out_path, timeout)
+    }
+
+    pub fn synthesize_timeout(
+        &mut self,
+        text: &str,
+        language: &str,
+        tone: &str,
+        voice: &str,
+        out_path: &Path,
+        timeout: Duration,
+    ) -> Result<PathBuf> {
         self.policy.touch(Role::Tts);
         let c = self.client_mut(Role::Tts)?;
-        let resp = c.request(
+        let resp = match c.request_timeout(
             "synthesize",
             params(&[
                 ("text", json!(text)),
@@ -210,7 +291,16 @@ impl WorkerManager {
                 ("voice", json!(voice)),
                 ("out_path", json!(out_path.to_string_lossy())),
             ]),
-        )?;
+            timeout,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                if is_timeout_error(&e) {
+                    self.kill_worker(Role::Tts);
+                }
+                return Err(e);
+            }
+        };
         if !resp.ok {
             bail!(
                 "{}",
@@ -220,7 +310,6 @@ impl WorkerManager {
                     .unwrap_or("synthesize failed")
             );
         }
-        // Sticky warm (B24): success never unloads.
         debug_assert!(!self.policy.should_unload_after_job());
         Ok(out_path.to_path_buf())
     }
@@ -253,9 +342,21 @@ impl DualModelPolicy {
     }
 }
 
+fn load_timeout(role: Role, model: &str) -> Duration {
+    match role {
+        Role::Stt if model == "medium" => timeouts::stt_load_medium(),
+        Role::Stt => timeouts::stt_load_small(),
+        Role::Tts => timeouts::tts_load(),
+    }
+}
+
 fn is_oom_error(err: &anyhow::Error) -> bool {
     let s = format!("{err:#}").to_lowercase();
     s.contains("oom") || s.contains("out of memory")
+}
+
+fn is_timeout_error(err: &anyhow::Error) -> bool {
+    format!("{err:#}").to_lowercase().contains("timed out")
 }
 
 /// Resolve python root relative to executable / env / config.
@@ -267,7 +368,6 @@ pub fn resolve_python_root(cfg: &Config) -> PathBuf {
     if from_cfg.is_dir() {
         return from_cfg;
     }
-    // try relative to CARGO_MANIFEST_DIR at compile for tests/dev
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
     if manifest.is_dir() {
         return manifest;
@@ -299,5 +399,11 @@ mod tests {
             "python root should contain packages: {}",
             root.display()
         );
+    }
+
+    #[test]
+    fn synth_timeout_bounds() {
+        assert_eq!(timeouts::tts_synth_chunk(0).as_secs(), 45);
+        assert_eq!(timeouts::tts_synth_chunk(10_000).as_secs(), 180);
     }
 }

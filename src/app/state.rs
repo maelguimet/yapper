@@ -1,5 +1,7 @@
 //! YapperApp state construction and status labels.
 
+use super::jobs::JobHub;
+use super::tts_controller::TtsController;
 use super::{HotkeyCaptureField, MainTab};
 use crate::audio::{
     human_mic_label, list_capture_sources, resolve_mic_source, PulseSource, RecordingSession,
@@ -16,7 +18,8 @@ use std::time::Instant;
 
 pub struct YapperApp {
     pub(crate) cfg: Config,
-    pub(crate) workers: WorkerManager,
+    /// Background job hub owns real WorkerManager (never block UI on synth/load).
+    pub(crate) jobs: JobHub,
     pub(crate) status: String,
     pub(crate) stt_model: String,
     pub(crate) tts_tone: String,
@@ -29,59 +32,76 @@ pub struct YapperApp {
     pub(crate) read_clipboard: bool,
     pub(crate) recording: Option<RecordingSession>,
     pub(crate) transport: AudioTransport,
-    /// Remaining TTS segments waiting to synthesize (chunked path).
-    pub(crate) tts_queue: Vec<String>,
-    /// Index of next segment to synth (1-based status uses total).
-    pub(crate) tts_queue_total: usize,
-    /// Cancel flag for in-flight multi-segment speak.
-    pub(crate) tts_cancel: bool,
-    /// Paths of temp WAVs for current monologue (deleted on stop/finish).
-    pub(crate) tts_chunk_paths: Vec<PathBuf>,
-    /// Concatenated last successful monologue for whole-utterance replay when available.
+    /// Chunked TTS prebuffer controller (job ids, ready queue).
+    pub(crate) tts: TtsController,
+    /// Durable full-utterance WAV for Replay (concatenated multi-chunk).
     pub(crate) tts_last_full_path: Option<PathBuf>,
+    /// Mirror of worker load state (updated via AppMsg::ModelStatus).
+    pub(crate) stt_loaded: bool,
+    pub(crate) stt_model_id: Option<String>,
+    pub(crate) tts_loaded: bool,
+    pub(crate) tts_model_id: Option<String>,
+    pub(crate) stt_loading: bool,
+    pub(crate) tts_loading: bool,
+    /// Pending transcribe after autoload.
+    pub(crate) pending_transcribe: Option<PathBuf>,
+    /// Pending speak after TTS autoload.
+    pub(crate) pending_speak: Option<String>,
+    /// When true, next successful Transcribed also injects at cursor (PTT path).
+    pub(crate) insert_after_transcribe: bool,
     pub(crate) hotkeys: Option<HotkeyHub>,
     pub(crate) hotkey_error: Option<String>,
-    /// Field currently listening for a key combo (capture picker).
     pub(crate) hotkey_capture: Option<HotkeyCaptureField>,
     pub(crate) tray: Option<TrayHandle>,
     pub(crate) tray_error: Option<String>,
-    /// First tray create already attempted (may still retry while failed).
     pub(crate) tray_tried: bool,
-    /// Next tray create retry instant when first create failed.
     pub(crate) tray_retry_at: Option<Instant>,
-    /// When true, window close is allowed to end the process (tray Quit / confirmed Exit).
     pub(crate) hard_quit_armed: bool,
-    /// In-window Exit confirmation dialog state.
     pub(crate) exit_prompt: ExitPromptState,
-    /// Pulse source names for the mic dropdown (plus empty = system default).
     pub(crate) mic_sources: Vec<PulseSource>,
     pub(crate) mic_list_error: Option<String>,
-    /// Selected source name; empty string means system default.
     pub(crate) mic_source: String,
-    /// Live peak level 0..=1 while recording.
     pub(crate) record_level: f32,
-    /// Main workspace tab (STT / TTS / Settings).
     pub(crate) main_tab: MainTab,
-    /// Theme applied once after first frame context is ready.
     pub(crate) theme_applied: bool,
+    /// Snapshot of work-tab prefs for autosave dirty detection.
+    pub(crate) last_saved_prefs: PrefsSnapshot,
+}
+
+/// Work-tab preferences that should autosave (hotkeys still need Apply).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefsSnapshot {
+    pub stt_language: String,
+    pub copy_transcript: bool,
+    pub tts_language: String,
+    pub tts_tone: String,
+    pub read_clipboard: bool,
+    pub mic_source: String,
+    pub stt_model: String,
 }
 
 impl YapperApp {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut cfg = Config::load_or_default().unwrap_or_default();
-        // Resolve paths for this install/checkout
         cfg.paths.python_root = resolve_python_root(&cfg).to_string_lossy().into();
         cfg.paths.python_bin = resolve_python_bin(&cfg);
 
-        let mut workers = WorkerManager::new(cfg.clone());
-        let tones = workers.list_tones().unwrap_or_else(|_| {
-            vec![
-                "neutral".into(),
-                "calm".into(),
-                "excited".into(),
-                "serious".into(),
-            ]
-        });
+        // One-shot tone list (no model load); job hub owns workers afterwards.
+        let tones = {
+            let mut probe = WorkerManager::new(cfg.clone());
+            let t = probe.list_tones().unwrap_or_else(|_| {
+                vec![
+                    "neutral".into(),
+                    "calm".into(),
+                    "excited".into(),
+                    "serious".into(),
+                ]
+            });
+            probe.shutdown_all();
+            t
+        };
+
+        let jobs = JobHub::start(cfg.clone());
 
         let (hotkeys, hotkey_error) =
             match HotkeyHub::register(&cfg.hotkeys.read_aloud, &cfg.hotkeys.push_to_talk) {
@@ -101,11 +121,21 @@ impl YapperApp {
         let read_clipboard = cfg.read_aloud.source == "clipboard";
         let mic_source = cfg.audio.mic_source.clone();
 
-        let _ = cc; // creation context reserved for future fonts/theme
+        let _ = cc;
+
+        let last_saved_prefs = PrefsSnapshot {
+            stt_language: stt_language.clone(),
+            copy_transcript,
+            tts_language: tts_language.clone(),
+            tts_tone: tts_tone.clone(),
+            read_clipboard,
+            mic_source: mic_source.clone(),
+            stt_model: stt_model.clone(),
+        };
 
         let mut app = Self {
             cfg,
-            workers,
+            jobs,
             status: "ready".into(),
             stt_model,
             tts_tone,
@@ -118,11 +148,17 @@ impl YapperApp {
             read_clipboard,
             recording: None,
             transport: AudioTransport::default(),
-            tts_queue: Vec::new(),
-            tts_queue_total: 0,
-            tts_cancel: false,
-            tts_chunk_paths: Vec::new(),
+            tts: TtsController::default(),
             tts_last_full_path: None,
+            stt_loaded: false,
+            stt_model_id: None,
+            tts_loaded: false,
+            tts_model_id: None,
+            stt_loading: false,
+            tts_loading: false,
+            pending_transcribe: None,
+            pending_speak: None,
+            insert_after_transcribe: false,
             hotkeys,
             hotkey_error,
             hotkey_capture: None,
@@ -138,25 +174,24 @@ impl YapperApp {
             record_level: 0.0,
             main_tab: MainTab::Stt,
             theme_applied: false,
+            last_saved_prefs,
         };
         app.refresh_mic_sources();
         app
     }
 
     pub(crate) fn stt_status_label(&self) -> String {
-        load_status_label(
-            "STT",
-            self.workers.stt_loaded(),
-            self.workers.policy.stt.model_id.as_deref(),
-        )
+        if self.stt_loading {
+            return format!("STT … loading {}", self.stt_model);
+        }
+        load_status_label("STT", self.stt_loaded, self.stt_model_id.as_deref())
     }
 
     pub(crate) fn tts_status_label(&self) -> String {
-        load_status_label(
-            "TTS",
-            self.workers.tts_loaded(),
-            self.workers.policy.tts.model_id.as_deref(),
-        )
+        if self.tts_loading {
+            return "TTS … loading".into();
+        }
+        load_status_label("TTS", self.tts_loaded, self.tts_model_id.as_deref())
     }
 
     pub(crate) fn refresh_mic_sources(&mut self) {
@@ -183,6 +218,30 @@ impl YapperApp {
         }
     }
 
+    pub(crate) fn current_prefs(&self) -> PrefsSnapshot {
+        PrefsSnapshot {
+            stt_language: self.stt_language.clone(),
+            copy_transcript: self.copy_transcript,
+            tts_language: self.tts_language.clone(),
+            tts_tone: self.tts_tone.clone(),
+            read_clipboard: self.read_clipboard,
+            mic_source: self.mic_source.clone(),
+            stt_model: self.stt_model.clone(),
+        }
+    }
+
+    pub(crate) fn prefs_dirty(&self) -> bool {
+        self.current_prefs() != self.last_saved_prefs
+    }
+
+    /// Autosave low-risk work-tab prefs when dirty.
+    pub(crate) fn autosave_prefs_if_dirty(&mut self) {
+        if !self.prefs_dirty() {
+            return;
+        }
+        self.persist();
+    }
+
     pub(crate) fn persist(&mut self) {
         self.cfg.stt.model = self.stt_model.clone();
         self.cfg.stt.language = self.stt_language.clone();
@@ -195,9 +254,13 @@ impl YapperApp {
             "selection".into()
         };
         self.cfg.audio.mic_source = self.mic_source.clone();
-        if let Err(e) = self.cfg.save_default_location() {
-            self.status = format!("config save failed: {e}");
+        match self.cfg.save_default_location() {
+            Ok(()) => {
+                self.last_saved_prefs = self.current_prefs();
+            }
+            Err(e) => {
+                self.status = format!("config save failed: {e}");
+            }
         }
     }
-
 }

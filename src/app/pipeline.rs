@@ -1,5 +1,6 @@
-//! YapperApp pipeline: load/unload, speak, record, transport.
+//! YapperApp pipeline: async load/speak/transcribe via JobHub; transport pump.
 
+use super::messages::{is_live_tts_job, AppMsg, JobCmd};
 use super::YapperApp;
 use crate::audio::{start_recording, stop_recording, temp_wav_path};
 use crate::policy::Role;
@@ -9,28 +10,34 @@ use crate::transport::TransportStatus;
 use crate::ui::{
     chunk_paths_retained_for_replay, chunk_paths_to_remove, resolve_replay_path,
 };
+use crate::wavutil::concat_wav_files;
 use crate::x11util::{self, ClipboardSel};
 use std::path::PathBuf;
 
 impl YapperApp {
     pub(crate) fn cancel_tts_pipeline(&mut self) {
-        self.tts_cancel = true;
-        self.tts_queue.clear();
-        self.tts_queue_total = 0;
+        let had_in_flight = self.tts.synth_in_flight;
+        self.tts.cancel();
+        self.pending_speak = None;
         self.transport.set_pending_queue(false);
         self.transport.stop();
+        if had_in_flight {
+            // Mid-generate cannot cancel cooperatively — kill TTS worker.
+            self.jobs.send(JobCmd::CancelTtsWorker);
+            self.tts_loaded = false;
+            self.tts_model_id = None;
+        }
         self.cleanup_chunk_temps_keeping_replay();
     }
 
     /// Delete intermediate chunk temps; retain `tts_last_full_path` on disk.
     pub(crate) fn cleanup_chunk_temps_keeping_replay(&mut self) {
-        // Prefer durable last-success; fall back to transport path if set.
         let keep = self
             .tts_last_full_path
             .clone()
             .or_else(|| self.transport.machine().last_path.clone())
             .filter(|p| p.is_file());
-        let original = std::mem::take(&mut self.tts_chunk_paths);
+        let original = std::mem::take(&mut self.tts.chunk_paths);
         for p in chunk_paths_to_remove(&original, keep.as_deref()) {
             let _ = std::fs::remove_file(p);
         }
@@ -40,30 +47,25 @@ impl YapperApp {
                 retained.push(k.clone());
             }
         }
-        self.tts_chunk_paths = retained;
+        self.tts.chunk_paths = retained;
         self.tts_last_full_path = keep.clone();
         if let Some(p) = keep {
             self.transport.remember_path(p);
         }
     }
 
-    /// Full wipe (quit / unload) — no Replay after this.
     pub(crate) fn discard_all_tts_audio(&mut self) {
-        self.tts_cancel = true;
-        self.tts_queue.clear();
-        self.tts_queue_total = 0;
+        self.tts.cancel();
+        self.pending_speak = None;
         self.transport.set_pending_queue(false);
         self.transport.stop();
+        self.transport.clear_last_path();
         self.tts_last_full_path = None;
-        for p in self.tts_chunk_paths.drain(..) {
+        for p in self.tts.chunk_paths.drain(..) {
             let _ = std::fs::remove_file(p);
         }
-        // Clear transport last_path by stopping without keep — use play of nothing.
-        // stop() keeps last_path; force clear by replacing transport machine via stop then
-        // dropping the path file already deleted. replay() will then return false.
     }
 
-    /// Replay last successful synth without re-synthesizing (survives Stop).
     pub(crate) fn replay_last(&mut self) -> anyhow::Result<bool> {
         let transport_last = self.transport.machine().last_path.clone();
         let path = resolve_replay_path(
@@ -81,62 +83,52 @@ impl YapperApp {
         self.transport.replay()
     }
 
-    /// Intercept title-bar close / minimize → hide; only hard_quit_armed exits.
     pub(crate) fn load_stt(&mut self) {
-        self.status = format!("loading STT {}…", self.stt_model);
-        match self
-            .workers
-            .load(Role::Stt, &self.stt_model, "cuda")
-        {
-            Ok(()) => self.status = format!("STT {} loaded", self.stt_model),
-            Err(e) => self.status = format!("STT load error: {e:#}"),
+        if self.stt_loading {
+            return;
         }
+        self.stt_loading = true;
+        self.status = format!("loading STT {}…", self.stt_model);
+        self.jobs.send(JobCmd::LoadStt {
+            model: self.stt_model.clone(),
+            device: "cuda".into(),
+        });
     }
 
     pub(crate) fn unload_stt(&mut self) {
-        match self.workers.unload(Role::Stt) {
-            Ok(()) => self.status = "STT unloaded".into(),
-            Err(e) => self.status = format!("STT unload error: {e:#}"),
-        }
+        self.jobs.send(JobCmd::Unload { role: Role::Stt });
+        self.status = "unloading STT…".into();
     }
 
     pub(crate) fn load_tts(&mut self) {
-        self.status = "loading TTS…".into();
-        match self
-            .workers
-            .load(Role::Tts, "chatterbox-multilingual", "cuda")
-        {
-            Ok(()) => self.status = "TTS loaded".into(),
-            Err(e) => self.status = format!("TTS load error: {e:#}"),
+        if self.tts_loading {
+            return;
         }
+        self.tts_loading = true;
+        self.status = "loading TTS…".into();
+        self.jobs.send(JobCmd::LoadTts {
+            device: "cuda".into(),
+        });
     }
 
     pub(crate) fn unload_tts(&mut self) {
-        // Unload frees the model; drop replay audio too (temps not needed).
         self.discard_all_tts_audio();
-        match self.workers.unload(Role::Tts) {
-            Ok(()) => self.status = "TTS unloaded".into(),
-            Err(e) => self.status = format!("TTS unload error: {e:#}"),
-        }
+        self.jobs.send(JobCmd::Unload { role: Role::Tts });
+        self.status = "unloading TTS…".into();
     }
 
     pub(crate) fn do_transcribe_file(&mut self, path: PathBuf) {
-        if !self.workers.stt_loaded() {
+        if !self.stt_loaded {
+            self.pending_transcribe = Some(path);
             self.load_stt();
+            self.status = "loading STT for transcription…".into();
+            return;
         }
-        match self.workers.transcribe(&path, &self.stt_language) {
-            Ok(text) => {
-                self.transcript = text.clone();
-                if self.copy_transcript {
-                    if let Err(e) = x11util::write_clipboard(&text) {
-                        self.status = format!("transcribed; clipboard failed: {e}");
-                        return;
-                    }
-                }
-                self.status = "transcribed".into();
-            }
-            Err(e) => self.status = format!("transcribe error: {e:#}"),
-        }
+        self.status = "transcribing…".into();
+        self.jobs.send(JobCmd::Transcribe {
+            path,
+            language: self.stt_language.clone(),
+        });
     }
 
     pub(crate) fn do_speak(&mut self, text: &str) {
@@ -145,35 +137,229 @@ impl YapperApp {
             self.status = "nothing to speak".into();
             return;
         }
-        if !self.workers.tts_loaded() {
+        if !self.tts_loaded {
+            self.pending_speak = Some(text);
             self.load_tts();
-            if !self.workers.tts_loaded() {
-                return;
-            }
+            self.status = "loading TTS…".into();
+            return;
         }
+        self.start_speak_job(text);
+    }
+
+    fn start_speak_job(&mut self, text: String) {
         // Cancel any prior monologue; start chunked pipeline.
-        self.cancel_tts_pipeline();
-        self.tts_cancel = false;
+        let had_in_flight = self.tts.synth_in_flight;
+        self.tts.cancel();
+        self.transport.set_pending_queue(false);
+        self.transport.stop();
+        if had_in_flight {
+            self.jobs.send(JobCmd::CancelTtsWorker);
+            self.tts_loaded = false;
+            self.tts_model_id = None;
+            // Will need reload before synth — queue speak.
+            self.pending_speak = Some(text);
+            self.load_tts();
+            return;
+        }
+
         let segments = split_for_tts(&text);
         if segments.is_empty() {
             self.status = "nothing to speak".into();
             return;
         }
-        // estimate_segment_count is the UI-facing counter; keep it wired.
         let est = estimate_segment_count(&text);
-        self.tts_queue_total = est.max(segments.len());
-        self.tts_queue = segments;
-        self.transport.set_pending_queue(self.tts_queue.len() > 1);
-        self.status = format!("synthesizing 1/{}...", self.tts_queue_total);
-        self.pump_tts_queue();
+        let _ = est;
+        let job_id = self.tts.begin_job(segments);
+        self.transport
+            .set_pending_queue(self.tts.pending.len() > 1);
+        self.status = format!("synthesizing 1/{}…", self.tts.total);
+        let _ = job_id;
+        self.pump_tts_synth();
     }
 
-    /// Synth next segment if transport is free enough to accept more audio.
-    pub(crate) fn pump_tts_queue(&mut self) {
-        if self.tts_cancel {
+    /// Request background synth for next pending segment if prebuffer room.
+    pub(crate) fn pump_tts_synth(&mut self) {
+        if !self.tts_loaded || !self.tts.should_request_synth() {
             return;
         }
-        // Only start next segment when idle/buffering or queue is the first item.
+        let Some(job_id) = self.tts.active_job else {
+            return;
+        };
+        let Some(seg) = self.tts.peek_pending().cloned() else {
+            return;
+        };
+        self.tts.mark_synth_started();
+        let out = temp_wav_path("tts-chunk");
+        self.status = format!(
+            "synthesizing {}/{}…",
+            seg.index + 1,
+            self.tts.total
+        );
+        self.jobs.send(JobCmd::Synthesize {
+            job_id,
+            index: seg.index,
+            total: self.tts.total,
+            text: seg.text,
+            language: self.tts_language.clone(),
+            tone: self.tts_tone.clone(),
+            voice: self.cfg.tts.voice.clone(),
+            out_path: out,
+        });
+    }
+
+    /// Drain job messages (UI thread only).
+    pub(crate) fn drain_job_messages(&mut self) {
+        for msg in self.jobs.drain() {
+            self.handle_app_msg(msg);
+        }
+    }
+
+    fn handle_app_msg(&mut self, msg: AppMsg) {
+        match msg {
+            AppMsg::ModelStatus {
+                stt_loaded,
+                stt_model,
+                tts_loaded,
+                tts_model,
+            } => {
+                self.stt_loaded = stt_loaded;
+                self.stt_model_id = stt_model;
+                self.tts_loaded = tts_loaded;
+                self.tts_model_id = tts_model;
+            }
+            AppMsg::SttLoaded { model, result } => {
+                self.stt_loading = false;
+                match result {
+                    Ok(()) => {
+                        self.stt_loaded = true;
+                        self.stt_model_id = Some(model.clone());
+                        self.status = format!("STT {model} loaded");
+                        if let Some(path) = self.pending_transcribe.take() {
+                            self.do_transcribe_file(path);
+                        }
+                    }
+                    Err(e) => {
+                        self.status = format!("STT load error: {e}");
+                        self.pending_transcribe = None;
+                    }
+                }
+            }
+            AppMsg::TtsLoaded { result } => {
+                self.tts_loading = false;
+                match result {
+                    Ok(()) => {
+                        self.tts_loaded = true;
+                        self.tts_model_id = Some("chatterbox-multilingual".into());
+                        self.status = "TTS loaded".into();
+                        if let Some(text) = self.pending_speak.take() {
+                            self.start_speak_job(text);
+                        } else {
+                            self.pump_tts_synth();
+                        }
+                    }
+                    Err(e) => {
+                        self.status = format!("TTS load error: {e}");
+                        self.pending_speak = None;
+                    }
+                }
+            }
+            AppMsg::Unloaded { role, result } => {
+                match result {
+                    Ok(()) => {
+                        self.status = match role {
+                            Some(Role::Stt) => "STT unloaded".into(),
+                            Some(Role::Tts) => "TTS unloaded".into(),
+                            None => "all unloaded".into(),
+                        };
+                    }
+                    Err(e) => self.status = format!("unload error: {e}"),
+                }
+            }
+            AppMsg::Transcribed { text } => {
+                self.transcript = text.clone();
+                if self.copy_transcript {
+                    if let Err(e) = x11util::write_clipboard(&text) {
+                        self.status = format!("transcribed; clipboard failed: {e}");
+                        self.insert_after_transcribe = false;
+                        return;
+                    }
+                }
+                if self.insert_after_transcribe {
+                    self.insert_after_transcribe = false;
+                    if !text.is_empty() {
+                        match x11util::insert_transcript_at_cursor(&text, true) {
+                            Ok(()) => self.status = "inserted transcript".into(),
+                            Err(e) => {
+                                self.status = format!("transcribed; paste failed: {e}");
+                            }
+                        }
+                        return;
+                    }
+                }
+                self.status = "transcribed".into();
+            }
+            AppMsg::TranscribeFailed { error, path } => {
+                self.status = format!("transcribe error: {error} ({})", path.display());
+            }
+            AppMsg::TtsChunkReady {
+                job_id,
+                index,
+                text,
+                path,
+                duration_secs,
+            } => {
+                if !is_live_tts_job(self.tts.active_job, job_id) {
+                    let _ = std::fs::remove_file(&path);
+                    return;
+                }
+                if !self.tts.on_chunk_ready(job_id, index, text, path, duration_secs) {
+                    return;
+                }
+                self.transport
+                    .set_pending_queue(!self.tts.pending.is_empty() || !self.tts.ready.is_empty());
+                self.try_play_next_ready();
+                self.pump_tts_synth();
+                self.update_speak_status();
+            }
+            AppMsg::TtsChunkFailed {
+                job_id,
+                index,
+                error,
+            } => {
+                if !is_live_tts_job(self.tts.active_job, job_id) {
+                    return;
+                }
+                let retry = self.tts.on_chunk_failed(job_id, index);
+                if retry.is_some() {
+                    self.status = format!("segment {} failed, retrying… ({error})", index + 1);
+                } else {
+                    self.status = format!("segment {} skipped: {error}", index + 1);
+                }
+                // If worker was killed on timeout, tts_loaded may be false — reload.
+                if !self.tts_loaded && self.tts.active_job.is_some() {
+                    self.load_tts();
+                } else {
+                    self.pump_tts_synth();
+                }
+                self.try_play_next_ready();
+            }
+            AppMsg::WorkerTimedOut { role, op, error } => {
+                match role {
+                    Role::Stt => {
+                        self.stt_loaded = false;
+                        self.stt_model_id = None;
+                    }
+                    Role::Tts => {
+                        self.tts_loaded = false;
+                        self.tts_model_id = None;
+                    }
+                }
+                self.status = format!("{role:?} {op} timed out: {error}");
+            }
+        }
+    }
+
+    fn try_play_next_ready(&mut self) {
         let can_start = matches!(
             self.transport.status(),
             TransportStatus::Idle | TransportStatus::Buffering
@@ -181,101 +367,109 @@ impl YapperApp {
         if !can_start {
             return;
         }
-        let Some(segment) = self.tts_queue.first().cloned() else {
-            self.transport.set_pending_queue(false);
+        let Some(chunk) = self.tts.pop_ready() else {
+            if self.tts.pending.is_empty() && !self.tts.synth_in_flight {
+                self.transport.set_pending_queue(false);
+                self.finalize_tts_job_if_done();
+            }
             return;
         };
-        let done = self.tts_queue_total.saturating_sub(self.tts_queue.len()) + 1;
-        self.status = format!("synthesizing {done}/{}…", self.tts_queue_total);
-        let out = temp_wav_path("tts-chunk");
-        match self.workers.synthesize(
-            &segment,
-            &self.tts_language,
-            &self.tts_tone,
-            &self.cfg.tts.voice,
-            &out,
-        ) {
-            Ok(path) => {
-                let _ = self.tts_queue.remove(0);
-                // Promote new last-success; drop previous durable WAV if different.
-                if let Some(old) = self.tts_last_full_path.take() {
-                    if old != path {
-                        let _ = std::fs::remove_file(&old);
-                        self.tts_chunk_paths.retain(|p| p != &old);
+        self.transport.set_pending_queue(
+            !self.tts.pending.is_empty()
+                || !self.tts.ready.is_empty()
+                || self.tts.synth_in_flight,
+        );
+        if let Err(e) = self.transport.play_file(&chunk.path) {
+            self.status = format!("playback error: {e:#}");
+            return;
+        }
+        self.update_speak_status();
+        // Keep prebuffer full while playing.
+        self.pump_tts_synth();
+    }
+
+    fn update_speak_status(&mut self) {
+        if self.tts.active_job.is_none() {
+            return;
+        }
+        let prog = self.tts.progress_label();
+        let time = self.transport.machine().format_time_label();
+        if self.tts.synth_in_flight {
+            self.status = format!("speaking {prog} · synth next · ({time})");
+        } else if !self.tts.ready.is_empty() || !self.tts.pending.is_empty() {
+            self.status = format!("speaking {prog} · ({time})");
+        } else {
+            self.status = format!("speaking ({time})");
+        }
+    }
+
+    fn finalize_tts_job_if_done(&mut self) {
+        if self.tts.active_job.is_none() {
+            return;
+        }
+        if self.tts.has_work() {
+            return;
+        }
+        if !matches!(self.transport.status(), TransportStatus::Idle) {
+            return;
+        }
+        // Build full-utterance WAV for Replay.
+        let paths = self.tts.chunk_paths.clone();
+        if !paths.is_empty() {
+            let out = temp_wav_path("tts-full");
+            match concat_wav_files(&paths, &out) {
+                Ok(()) => {
+                    // Drop intermediate chunks; keep full only.
+                    for p in &paths {
+                        if p != &out {
+                            let _ = std::fs::remove_file(p);
+                        }
                     }
+                    self.tts.chunk_paths = vec![out.clone()];
+                    self.tts_last_full_path = Some(out.clone());
+                    self.transport.remember_path(out);
                 }
-                self.tts_chunk_paths.push(path.clone());
-                self.tts_last_full_path = Some(path.clone());
-                self.transport
-                    .set_pending_queue(!self.tts_queue.is_empty());
-                if let Err(e) = self.transport.play_file(&path) {
-                    self.status = format!("playback error: {e:#}");
+                Err(e) => {
+                    // Fallback: last chunk only.
+                    if let Some(last) = paths.last() {
+                        self.tts_last_full_path = Some(last.clone());
+                        self.transport.remember_path(last.clone());
+                    }
+                    self.status = format!("ready (full concat failed: {e:#})");
+                    self.tts.active_job = None;
+                    self.tts.total = 0;
                     return;
-                }
-                if self.tts_queue.is_empty() {
-                    self.status = format!(
-                        "speaking ({})…",
-                        self.transport.machine().format_time_label()
-                    );
-                } else {
-                    self.status = format!(
-                        "speaking {done}/{} — more buffering…",
-                        self.tts_queue_total
-                    );
-                }
-            }
-            Err(e) => {
-                // Isolate bad chunk: drop it and try next unless queue empty.
-                let _ = self.tts_queue.remove(0);
-                self.status = format!("segment {done} failed: {e:#}");
-                if !self.tts_queue.is_empty() && !self.tts_cancel {
-                    self.pump_tts_queue();
-                } else {
-                    self.transport.set_pending_queue(false);
                 }
             }
         }
+        self.tts.active_job = None;
+        self.tts.total = 0;
+        self.status = "ready".into();
     }
 
     pub(crate) fn poll_transport(&mut self) {
         self.transport.tick();
-        // When a chunk ends and more remain, synth+play next.
+        // When player free and ready chunks exist, start next without waiting for synth.
         if matches!(
             self.transport.status(),
             TransportStatus::Idle | TransportStatus::Buffering
-        ) && !self.tts_queue.is_empty()
-            && !self.tts_cancel
-        {
-            self.pump_tts_queue();
+        ) {
+            self.try_play_next_ready();
         } else if self.transport.status() == TransportStatus::Playing {
-            self.status = format!(
-                "speaking ({}) [{}]",
-                self.transport.machine().format_time_label(),
-                self.transport.status().as_str()
-            );
+            self.update_speak_status();
+            // Prebuffer while playing.
+            self.pump_tts_synth();
         } else if self.transport.status() == TransportStatus::Paused {
             self.status = format!(
                 "paused ({})",
                 self.transport.machine().format_time_label()
             );
-        } else if self.tts_queue.is_empty()
-            && self.transport.status() == TransportStatus::Idle
-            && self.tts_queue_total > 0
+        }
+        if matches!(self.transport.status(), TransportStatus::Idle)
+            && !self.tts.has_work()
+            && self.tts.active_job.is_some()
         {
-            // Finished monologue — leave a quiet ready status once.
-            if self.status.starts_with("speaking") || self.status.starts_with("paused") {
-                self.status = "ready".into();
-                self.tts_queue_total = 0;
-                // Keep last chunk for replay; drop intermediates except last.
-                if let Some(last) = self.tts_chunk_paths.pop() {
-                    for p in self.tts_chunk_paths.drain(..) {
-                        if p != last {
-                            let _ = std::fs::remove_file(p);
-                        }
-                    }
-                    self.tts_chunk_paths.push(last);
-                }
-            }
+            self.finalize_tts_job_if_done();
         }
     }
 
@@ -316,16 +510,8 @@ impl YapperApp {
             match stop_recording(session) {
                 Ok(path) => {
                     if path.is_file() && path.metadata().map(|m| m.len() > 1000).unwrap_or(false) {
+                        self.insert_after_transcribe = true;
                         self.do_transcribe_file(path);
-                        if !self.transcript.is_empty() {
-                            if let Err(e) =
-                                x11util::insert_transcript_at_cursor(&self.transcript, true)
-                            {
-                                self.status = format!("transcribed; paste failed: {e}");
-                            } else {
-                                self.status = "inserted transcript".into();
-                            }
-                        }
                     } else {
                         self.status = "recording too short / empty".into();
                     }
@@ -338,10 +524,8 @@ impl YapperApp {
     pub(crate) fn poll_record_level(&mut self) {
         if let Some(session) = self.recording.as_ref() {
             if let Some(level) = session.level_01() {
-                // light smoothing so the bar is readable
                 self.record_level = self.record_level * 0.4 + level * 0.6;
             }
         }
     }
-
 }

@@ -11,9 +11,11 @@ mod mpv_backend;
 mod policy;
 mod segment;
 mod textprep;
+mod timeouts;
 mod transport;
 mod tray;
 mod ui;
+mod wavutil;
 mod workers;
 mod x11util;
 

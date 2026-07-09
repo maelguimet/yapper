@@ -89,8 +89,8 @@ impl YapperApp {
         }
         self.hard_quit_armed = true;
         self.discard_all_tts_audio();
-        let _ = self.workers.unload_all();
-        self.workers.shutdown_all();
+        self.jobs.send(crate::app::messages::JobCmd::UnloadAll);
+        self.jobs.send(crate::app::messages::JobCmd::Shutdown);
         if let Some(session) = self.recording.take() {
             let _ = stop_recording(session);
         }

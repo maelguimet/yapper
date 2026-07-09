@@ -1,12 +1,14 @@
-//! JSON-lines client for Python workers (stdio).
+//! JSON-lines client for Python workers (stdio) with request timeouts.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread;
 use std::time::Duration;
 
 static REQ_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -35,10 +37,13 @@ pub struct Response {
     pub error: Option<ErrorBody>,
 }
 
+/// Line-oriented JSON-RPC client. A dedicated reader thread feeds responses
+/// so `request_timeout` can bound waits and the UI/job thread never blocks forever.
 pub struct WorkerClient {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// Receives raw JSON lines (or reader-exit errors) from the stdout thread.
+    line_rx: Receiver<Result<String, String>>,
     pub role: String,
 }
 
@@ -62,15 +67,53 @@ impl WorkerClient {
             .with_context(|| format!("spawn {module} via {python_bin}"))?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+        let (line_tx, line_rx): (Sender<Result<String, String>>, _) = mpsc::channel();
+        let role_owned = role.to_string();
+        thread::Builder::new()
+            .name(format!("yapper-{role}-stdout"))
+            .spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                let mut buf = String::new();
+                loop {
+                    buf.clear();
+                    match reader.read_line(&mut buf) {
+                        Ok(0) => {
+                            let _ = line_tx.send(Err(format!(
+                                "worker {role_owned} closed stdout"
+                            )));
+                            break;
+                        }
+                        Ok(_) => {
+                            let trimmed = buf.trim();
+                            if trimmed.is_empty() || !trimmed.starts_with('{') {
+                                continue;
+                            }
+                            if line_tx.send(Ok(trimmed.to_string())).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = line_tx.send(Err(format!("read worker stdout: {e}")));
+                            break;
+                        }
+                    }
+                }
+            })
+            .context("spawn worker stdout reader")?;
         Ok(Self {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            line_rx,
             role: role.to_string(),
         })
     }
 
-    pub fn request(&mut self, cmd: &str, params: HashMap<String, Value>) -> Result<Response> {
+    pub fn request_timeout(
+        &mut self,
+        cmd: &str,
+        params: HashMap<String, Value>,
+        timeout: Duration,
+    ) -> Result<Response> {
         let id = REQ_COUNTER.fetch_add(1, Ordering::Relaxed).to_string();
         let req = Request {
             id: id.clone(),
@@ -82,48 +125,63 @@ impl WorkerClient {
         writeln!(self.stdin, "{line}")?;
         self.stdin.flush()?;
 
-        let mut buf = String::new();
-        // Workers are single-threaded; one line response expected.
+        let deadline = std::time::Instant::now() + timeout;
         loop {
-            buf.clear();
-            let n = self
-                .stdout
-                .read_line(&mut buf)
-                .context("read worker response")?;
-            if n == 0 {
-                bail!("worker {} closed stdout", self.role);
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                // Hard kill so the next call can restart a clean worker.
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                bail!(
+                    "worker {} timed out after {:?} on cmd={cmd}",
+                    self.role,
+                    timeout
+                );
             }
-            let trimmed = buf.trim();
-            if trimmed.is_empty() || !trimmed.starts_with('{') {
-                continue;
+            match self.line_rx.recv_timeout(remaining) {
+                Ok(Ok(raw)) => {
+                    let resp: Response = serde_json::from_str(&raw)
+                        .with_context(|| format!("parse response: {raw}"))?;
+                    if resp.id != id {
+                        // Stale/unexpected id — keep reading until ours arrives.
+                        continue;
+                    }
+                    return Ok(resp);
+                }
+                Ok(Err(e)) => bail!("{e}"),
+                Err(RecvTimeoutError::Timeout) => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    bail!(
+                        "worker {} timed out after {:?} on cmd={cmd}",
+                        self.role,
+                        timeout
+                    );
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    bail!("worker {} reader disconnected", self.role);
+                }
             }
-            let resp: Response = serde_json::from_str(trimmed)
-                .with_context(|| format!("parse response: {trimmed}"))?;
-            if resp.id != id {
-                // Unexpected; keep reading (should not happen for v1)
-                continue;
-            }
-            return Ok(resp);
         }
     }
 
     pub fn ping(&mut self) -> Result<Response> {
-        self.request("ping", HashMap::new())
-    }
-
-    #[allow(dead_code)]
-    pub fn status(&mut self) -> Result<Response> {
-        self.request("status", HashMap::new())
+        self.request_timeout("ping", HashMap::new(), Duration::from_secs(10))
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
-        let _ = self.request("shutdown", HashMap::new());
-        // Give process a moment then kill if needed
+        let _ = self.request_timeout("shutdown", HashMap::new(), Duration::from_secs(5));
         let _ = self.child.try_wait();
         std::thread::sleep(Duration::from_millis(50));
         let _ = self.child.kill();
         let _ = self.child.wait();
         Ok(())
+    }
+
+    /// Immediate kill without graceful unload (cancel mid-generate).
+    pub fn kill_now(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 
     pub fn is_running(&mut self) -> bool {
@@ -149,6 +207,7 @@ pub fn params(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
 
     #[test]
     fn request_serializes_cmd() {
@@ -177,5 +236,58 @@ mod tests {
         let r: Response = serde_json::from_str(raw).unwrap();
         assert!(!r.ok);
         assert_eq!(r.error.as_ref().unwrap().code, "not_loaded");
+    }
+
+    /// Fake hanging worker: never replies; request_timeout must return Err and kill.
+    #[test]
+    fn request_timeout_kills_hanging_worker() {
+        let mut child = Command::new("bash")
+            .args(["-c", "while true; do sleep 60; done"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleeper");
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (line_tx, line_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut buf = String::new();
+            loop {
+                buf.clear();
+                match reader.read_line(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let t = buf.trim();
+                        if t.starts_with('{') {
+                            let _ = line_tx.send(Ok(t.to_string()));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = line_tx.send(Err(e.to_string()));
+                        break;
+                    }
+                }
+            }
+        });
+        let mut client = WorkerClient {
+            child,
+            stdin,
+            line_rx,
+            role: "test".into(),
+        };
+        let err = client
+            .request_timeout("ping", HashMap::new(), Duration::from_millis(200))
+            .expect_err("must timeout");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.to_ascii_lowercase().contains("timed out"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            !client.is_running(),
+            "child should not still be running after timeout"
+        );
     }
 }

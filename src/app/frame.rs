@@ -5,7 +5,7 @@ use crate::audio::stop_recording;
 use crate::lifecycle::{ExitPromptState, ShellIntent};
 use crate::transport::TransportStatus;
 use crate::tray::pump_gtk_events;
-use crate::ui::{apply_yapper_theme, danger_button, primary_button, truncate_display};
+use crate::ui::{apply_yapper_theme, danger_button, truncate_display};
 use crate::x11util;
 use eframe::egui;
 
@@ -23,19 +23,30 @@ impl eframe::App for YapperApp {
         self.poll_hotkeys();
         self.poll_tray(ctx);
         self.poll_record_level();
+        // Drain background job results before transport so new chunks can play.
+        self.drain_job_messages();
         self.poll_transport();
+        self.autosave_prefs_if_dirty();
 
         let recording = self.recording.is_some();
         let playing = matches!(
             self.transport.status(),
             TransportStatus::Playing | TransportStatus::Buffering
         );
-        let repaint_ms =
-            if self.hotkey_capture.is_some() || self.tray.is_none() || recording || playing {
-                16
-            } else {
-                100
-            };
+        let busy = self.stt_loading
+            || self.tts_loading
+            || self.tts.synth_in_flight
+            || self.tts.has_work();
+        let repaint_ms = if self.hotkey_capture.is_some()
+            || self.tray.is_none()
+            || recording
+            || playing
+            || busy
+        {
+            16
+        } else {
+            100
+        };
         ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
 
         // ── Top chrome: brand, status, hide ──────────────────────────────
@@ -65,13 +76,17 @@ impl eframe::App for YapperApp {
 
             // Compact strip: models + mic + live rec pulse
             ui.horizontal(|ui| {
-                let stt_col = if self.workers.stt_loaded() {
+                let stt_col = if self.stt_loaded {
                     egui::Color32::from_rgb(100, 220, 140)
+                } else if self.stt_loading {
+                    egui::Color32::from_rgb(220, 200, 100)
                 } else {
                     egui::Color32::from_rgb(140, 140, 150)
                 };
-                let tts_col = if self.workers.tts_loaded() {
+                let tts_col = if self.tts_loaded {
                     egui::Color32::from_rgb(100, 220, 140)
+                } else if self.tts_loading {
+                    egui::Color32::from_rgb(220, 200, 100)
                 } else {
                     egui::Color32::from_rgb(140, 140, 150)
                 };
@@ -113,18 +128,37 @@ impl eframe::App for YapperApp {
                             if danger_button(ui, "Stop & transcribe").clicked() {
                                 self.ptt_release();
                             }
-                        } else if primary_button(ui, "Record").clicked() {
-                            self.ptt_press();
+                        } else {
+                            let rec = ui.add_enabled(
+                                !self.stt_loading,
+                                egui::Button::new(
+                                    egui::RichText::new("Record")
+                                        .color(egui::Color32::from_rgb(240, 248, 255))
+                                        .strong(),
+                                )
+                                .fill(egui::Color32::from_rgb(50, 110, 200))
+                                .min_size(egui::vec2(100.0, 28.0)),
+                            );
+                            if rec.clicked() {
+                                self.ptt_press();
+                            }
                         }
-                        if ui.button("Transcribe file…").clicked() {
+                        if ui
+                            .add_enabled(!self.stt_loading, egui::Button::new("Transcribe file…"))
+                            .clicked()
+                        {
                             if let Some(path) = rfd::FileDialog::new()
                                 .add_filter("audio", &["wav", "mp3", "m4a", "flac", "ogg"])
                                 .pick_file()
                             {
+                                self.insert_after_transcribe = false;
                                 self.do_transcribe_file(path);
                             }
                         }
-                        if ui.button("Copy transcript").clicked() {
+                        if ui
+                            .add_enabled(!self.transcript.is_empty(), egui::Button::new("Copy transcript"))
+                            .clicked()
+                        {
                             let _ = x11util::write_clipboard(&self.transcript);
                         }
                         if ui.button("Clear").clicked() {
@@ -132,7 +166,18 @@ impl eframe::App for YapperApp {
                         }
                     }
                     MainTab::Tts => {
-                        if primary_button(ui, "Speak").clicked() {
+                        let can_speak = !self.tts_text.trim().is_empty() && !self.tts_loading;
+                        let speak = ui.add_enabled(
+                            can_speak,
+                            egui::Button::new(
+                                egui::RichText::new("Speak")
+                                    .color(egui::Color32::from_rgb(240, 248, 255))
+                                    .strong(),
+                            )
+                            .fill(egui::Color32::from_rgb(50, 110, 200))
+                            .min_size(egui::vec2(100.0, 28.0)),
+                        );
+                        if speak.clicked() {
                             let t = self.tts_text.clone();
                             self.do_speak(&t);
                         }
@@ -140,18 +185,35 @@ impl eframe::App for YapperApp {
                             TransportStatus::Paused => "Resume",
                             _ => "Pause",
                         };
-                        if ui.button(pause_label).clicked() {
+                        let can_pause = self.transport.supports_transport_controls()
+                            && matches!(
+                                self.transport.status(),
+                                TransportStatus::Playing | TransportStatus::Paused
+                            );
+                        let pause_btn = ui
+                            .add_enabled(can_pause, egui::Button::new(pause_label))
+                            .on_hover_text(if self.transport.supports_transport_controls() {
+                                "Pause / resume"
+                            } else {
+                                "mpv required for pause/seek"
+                            });
+                        if pause_btn.clicked() {
                             self.transport.toggle_pause();
                         }
                         if danger_button(ui, "Stop").clicked() {
                             self.cancel_tts_pipeline();
                             self.status = "playback stopped".into();
                         }
+                        let can_replay = self.tts_last_full_path.as_ref().is_some_and(|p| p.is_file())
+                            || self
+                                .transport
+                                .machine()
+                                .last_path
+                                .as_ref()
+                                .is_some_and(|p| p.is_file());
                         if ui
-                            .button("Replay")
-                            .on_hover_text(
-                                "Replay last audio",
-                            )
+                            .add_enabled(can_replay, egui::Button::new("Replay"))
+                            .on_hover_text("Replay full last utterance")
                             .clicked()
                         {
                             match self.replay_last() {
@@ -163,7 +225,10 @@ impl eframe::App for YapperApp {
                         if ui.button("Read selection").clicked() {
                             self.read_aloud();
                         }
-                        if ui.button("Speak file…").clicked() {
+                        if ui
+                            .add_enabled(!self.tts_loading, egui::Button::new("Speak file…"))
+                            .clicked()
+                        {
                             if let Some(path) = rfd::FileDialog::new()
                                 .add_filter("text", &["txt", "md"])
                                 .pick_file()
@@ -250,24 +315,27 @@ impl eframe::App for YapperApp {
             ui.add_space(6.0);
             ui.separator();
 
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    match self.main_tab {
-                        MainTab::Stt => self.ui_tab_stt(ui),
-                        MainTab::Tts => self.ui_tab_tts(ui),
-                        MainTab::Settings => self.ui_tab_settings(ui, ctx),
-                    }
-                });
+            // Settings may scroll; STT/TTS give the editor the remaining height.
+            match self.main_tab {
+                MainTab::Stt => self.ui_tab_stt(ui),
+                MainTab::Tts => self.ui_tab_tts(ui),
+                MainTab::Settings => {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            self.ui_tab_settings(ui, ctx);
+                        });
+                }
+            }
         });
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Only reached on real process exit (hard quit or unexpected teardown).
         self.discard_all_tts_audio();
-        let _ = self.workers.unload_all();
-        self.workers.shutdown_all();
+        self.jobs.send(super::messages::JobCmd::UnloadAll);
+        self.jobs.send(super::messages::JobCmd::Shutdown);
         if let Some(session) = self.recording.take() {
             let _ = stop_recording(session);
         }

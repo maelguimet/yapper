@@ -1,10 +1,13 @@
 //! Main egui window + tray orchestration.
 
+mod jobs;
+pub(crate) mod messages;
 mod pipeline;
 mod shell;
 mod state;
 mod frame;
 mod tabs;
+mod tts_controller;
 
 pub use state::YapperApp;
 
