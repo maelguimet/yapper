@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
-"""Download Whisper models into ~/.local/share/yapper/models/whisper."""
+"""Download Whisper models into the configured models root.
+
+Default root: ``$YAPPER_MODELS_DIR/whisper`` if set, else
+``~/.local/share/yapper/models/whisper`` (or ``$YAPPER_DATA_DIR/models/whisper``).
+
+The Rust shell sets ``YAPPER_MODELS_DIR`` from ``config.toml`` ``[models] dir``
+when spawning workers; use the same env (or ``--models-dir``) for standalone runs.
+"""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -24,7 +32,14 @@ def main() -> int:
         choices=list(WHISPER_SIZES),
         help="Whisper sizes to download (default: small medium)",
     )
+    parser.add_argument(
+        "--models-dir",
+        default=None,
+        help="Models root (sets YAPPER_MODELS_DIR; Whisper files go under <dir>/whisper)",
+    )
     args = parser.parse_args()
+    if args.models_dir:
+        os.environ["YAPPER_MODELS_DIR"] = str(Path(args.models_dir).expanduser())
     ensure_runtime_dirs()
     print(f"download root: {whisper_models_dir()}")
     for size in args.sizes:

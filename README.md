@@ -171,11 +171,33 @@ Read-aloud hotkey uses the same streaming path.
 
 | Path | Purpose |
 |------|---------|
-| `~/.config/yapper/config.toml` | Settings, hotkeys, mic source |
-| `~/.local/share/yapper/models/` | Whisper weights |
-| `~/.local/share/yapper/voices/` | Eve tone references |
+| `~/.config/yapper/config.toml` | Settings, hotkeys, mic source, model/voice dirs |
+| `~/.local/share/yapper/models/` | Default Whisper weights (`[models] dir`) |
+| `~/.local/share/yapper/voices/` | Default Eve tone refs (`[models] voices_dir`) |
 | `~/.local/share/yapper/venv/` | Installer Python env |
 | `~/.local/share/yapper/logs/` | Logs |
+
+### Model and voice directories
+
+`config.toml` `[models]` is **honored** at runtime (not decorative):
+
+```toml
+[models]
+dir = "/home/you/.local/share/yapper/models"       # Whisper under <dir>/whisper/
+voices_dir = "/home/you/.local/share/yapper/voices"  # Eve eve_*.wav + knobs.json
+```
+
+The shell injects these as `YAPPER_MODELS_DIR` and `YAPPER_VOICES_DIR` when spawning
+STT/TTS workers. Standalone tools use the same env:
+
+```bash
+YAPPER_MODELS_DIR=/path/to/models python scripts/download_models.py small
+# or: python scripts/download_models.py --models-dir /path/to/models small
+YAPPER_VOICES_DIR=/path/to/voices ./scripts/install_voices.sh
+```
+
+Defaults match XDG under `~/.local/share/yapper/`. `yapper doctor` reports the
+configured roots and checks Whisper/voice files there.
 
 ### Microphone (Pulse / PipeWire)
 

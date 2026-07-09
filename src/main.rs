@@ -82,12 +82,27 @@ fn run_doctor() -> anyhow::Result<()> {
     cfg.paths.python_root = resolve_python_root(&cfg).to_string_lossy().into();
     cfg.paths.python_bin = resolve_python_bin(&cfg);
 
+    // Prefer config [models] paths (what workers actually use); fall back to XDG data.
+    let models_root = if cfg.models.dir.trim().is_empty() {
+        data.join("models")
+    } else {
+        std::path::PathBuf::from(cfg.models.dir.trim())
+    };
+    let voices_root = if cfg.models.voices_dir.trim().is_empty() {
+        data.join("voices")
+    } else {
+        std::path::PathBuf::from(cfg.models.voices_dir.trim())
+    };
+
     println!("yapper doctor");
     println!("  version: {}", env!("CARGO_PKG_VERSION"));
     println!("  config: {}", cfg_path.display());
     println!("  data:   {}", data.display());
-    println!("  models: {}", data.join("models").display());
-    println!("  voices: {}", data.join("voices").display());
+    println!("  models: {} (config models.dir)", models_root.display());
+    println!(
+        "  voices: {} (config models.voices_dir)",
+        voices_root.display()
+    );
     println!("  python_root: {}", cfg.paths.python_root);
     println!("  python_bin: {}", cfg.paths.python_bin);
     println!("  display: {:?}", std::env::var("DISPLAY").ok());
@@ -149,8 +164,8 @@ fn run_doctor() -> anyhow::Result<()> {
         worker_package_status(&cfg.paths.python_bin, &cfg.paths.python_root, "yapper_tts")
     );
 
-    let small = data.join("models/whisper/small.pt");
-    let medium = data.join("models/whisper/medium.pt");
+    let small = models_root.join("whisper/small.pt");
+    let medium = models_root.join("whisper/medium.pt");
     println!(
         "  whisper small: {}",
         if small.is_file() { "ok" } else { "missing" }
@@ -159,8 +174,7 @@ fn run_doctor() -> anyhow::Result<()> {
         "  whisper medium: {}",
         if medium.is_file() { "ok" } else { "missing" }
     );
-    let voices = data.join("voices");
-    let n_voices = std::fs::read_dir(&voices)
+    let n_voices = std::fs::read_dir(&voices_root)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
                 .filter(|e| {
@@ -173,12 +187,21 @@ fn run_doctor() -> anyhow::Result<()> {
                 .count()
         })
         .unwrap_or(0);
-    println!("  voice refs: {n_voices} wav(s) in {}", voices.display());
+    println!(
+        "  voice refs: {n_voices} wav(s) in {}",
+        voices_root.display()
+    );
 
     doctor_mic_probe(&cfg);
 
-    // Worker ping smoke (no model load)
-    match crate::ipc::WorkerClient::spawn("stt", &cfg.paths.python_bin, &cfg.paths.python_root) {
+    // Worker ping smoke (no model load); path env matches GUI WorkerManager.
+    match crate::ipc::WorkerClient::spawn(
+        "stt",
+        &cfg.paths.python_bin,
+        &cfg.paths.python_root,
+        &cfg.models.dir,
+        &cfg.models.voices_dir,
+    ) {
         Ok(mut w) => match w.ping() {
             Ok(r) if r.ok => println!("  stt worker ping: ok"),
             Ok(r) => println!("  stt worker ping: fail {:?}", r.error),
@@ -186,7 +209,13 @@ fn run_doctor() -> anyhow::Result<()> {
         },
         Err(e) => println!("  stt worker spawn: error {e:#}"),
     }
-    match crate::ipc::WorkerClient::spawn("tts", &cfg.paths.python_bin, &cfg.paths.python_root) {
+    match crate::ipc::WorkerClient::spawn(
+        "tts",
+        &cfg.paths.python_bin,
+        &cfg.paths.python_root,
+        &cfg.models.dir,
+        &cfg.models.voices_dir,
+    ) {
         Ok(mut w) => match w.ping() {
             Ok(r) if r.ok => println!("  tts worker ping: ok"),
             Ok(r) => println!("  tts worker ping: fail {:?}", r.error),

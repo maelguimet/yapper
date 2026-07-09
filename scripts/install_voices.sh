@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Copy/symlink Eve tone refs + knobs into ~/.local/share/yapper/voices
+# Copy/symlink Eve tone refs + knobs into the voices root.
+# Destination: $YAPPER_VOICES_DIR, else XDG ~/.local/share/yapper/voices
+# (same env the Rust shell injects from config.toml [models] voices_dir).
 set -euo pipefail
 
 DEST="${YAPPER_VOICES_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/yapper/voices}"

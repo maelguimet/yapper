@@ -84,22 +84,24 @@ setup_python() {
 install_voices() {
   log "installing Eve voice refs"
   if [[ "$DRY_RUN" == "1" ]]; then
-    log "[dry-run] scripts/install_voices.sh → $DATA/voices"
+    log "[dry-run] scripts/install_voices.sh → $DATA/voices (YAPPER_VOICES_DIR)"
     return
   fi
+  # Same env workers use (config models.voices_dir → YAPPER_VOICES_DIR).
   YAPPER_VOICES_DIR="$DATA/voices" bash "$ROOT/scripts/install_voices.sh" || warn "voice install failed"
 }
 
 download_models() {
   log "ensuring Whisper small model"
   if [[ "$DRY_RUN" == "1" ]]; then
-    log "[dry-run] download small → $DATA/models"
+    log "[dry-run] download small → $DATA/models (YAPPER_MODELS_DIR)"
     return
   fi
   local py="$VENV/bin/python"
   [[ -x "$py" ]] || py=python3
-  # Package is installed into the venv; no PYTHONPATH=$ROOT needed.
-  "$py" "$ROOT/scripts/download_models.py" small || warn "model download failed"
+  # Same env workers use (config models.dir → YAPPER_MODELS_DIR).
+  YAPPER_MODELS_DIR="$DATA/models" "$py" "$ROOT/scripts/download_models.py" small \
+    || warn "model download failed"
 }
 
 write_config() {

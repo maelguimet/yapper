@@ -1,4 +1,13 @@
-"""XDG-style paths for yapper data and models."""
+"""XDG-style paths for yapper data and models.
+
+Resolution order (models / voices):
+
+1. Explicit env: ``YAPPER_MODELS_DIR`` / ``YAPPER_VOICES_DIR`` (Rust shell injects
+   these from ``config.toml`` ``[models] dir`` / ``voices_dir`` when spawning workers).
+2. Else under ``data_dir()`` (``YAPPER_DATA_DIR`` or XDG ``~/.local/share/yapper``).
+
+Standalone scripts honor the same env vars so install/download/doctor agree with the app.
+"""
 
 from __future__ import annotations
 
@@ -29,14 +38,21 @@ def config_dir() -> Path:
 
 
 def models_dir() -> Path:
+    override = os.environ.get("YAPPER_MODELS_DIR")
+    if override and override.strip():
+        return Path(override).expanduser().resolve()
     return data_dir() / "models"
 
 
 def whisper_models_dir() -> Path:
+    """Whisper weight root: ``{models_dir}/whisper``."""
     return models_dir() / "whisper"
 
 
 def voices_dir() -> Path:
+    override = os.environ.get("YAPPER_VOICES_DIR")
+    if override and override.strip():
+        return Path(override).expanduser().resolve()
     return data_dir() / "voices"
 
 

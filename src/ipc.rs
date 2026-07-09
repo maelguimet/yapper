@@ -47,8 +47,35 @@ pub struct WorkerClient {
     pub role: String,
 }
 
+/// Env vars injected into STT/TTS worker processes from ``Config.models``.
+/// Python ``yapper_common.paths`` reads these ahead of pure XDG defaults.
+pub const ENV_MODELS_DIR: &str = "YAPPER_MODELS_DIR";
+pub const ENV_VOICES_DIR: &str = "YAPPER_VOICES_DIR";
+
+/// Build path-related env pairs for a worker child.
+/// Empty/whitespace values are skipped so pure XDG defaults still apply.
+pub fn worker_path_env(models_dir: &str, voices_dir: &str) -> Vec<(&'static str, String)> {
+    let mut out = Vec::with_capacity(2);
+    let models = models_dir.trim();
+    if !models.is_empty() {
+        out.push((ENV_MODELS_DIR, models.to_string()));
+    }
+    let voices = voices_dir.trim();
+    if !voices.is_empty() {
+        out.push((ENV_VOICES_DIR, voices.to_string()));
+    }
+    out
+}
+
 impl WorkerClient {
-    pub fn spawn(role: &str, python_bin: &str, python_root: &str) -> Result<Self> {
+    /// Spawn a worker, injecting models/voices roots from config (via env).
+    pub fn spawn(
+        role: &str,
+        python_bin: &str,
+        python_root: &str,
+        models_dir: &str,
+        voices_dir: &str,
+    ) -> Result<Self> {
         let module = match role {
             "stt" => "yapper_stt",
             "tts" => "yapper_tts",
@@ -66,6 +93,9 @@ impl WorkerClient {
         let root = python_root.trim();
         if !root.is_empty() {
             cmd.env("PYTHONPATH", root);
+        }
+        for (key, val) in worker_path_env(models_dir, voices_dir) {
+            cmd.env(key, val);
         }
         let mut child = cmd
             .spawn()
@@ -250,6 +280,51 @@ mod tests {
         let s = serde_json::to_string(&req).unwrap();
         assert!(s.contains("\"cmd\":\"ping\""));
         assert!(s.contains("\"proto\":1"));
+    }
+
+    #[test]
+    fn worker_path_env_propagates_custom_dirs() {
+        let env = worker_path_env("/custom/models", "/custom/voices");
+        assert_eq!(
+            env,
+            vec![
+                (ENV_MODELS_DIR, "/custom/models".into()),
+                (ENV_VOICES_DIR, "/custom/voices".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn worker_path_env_skips_blank_dirs() {
+        assert!(worker_path_env("", "  ").is_empty());
+        assert_eq!(
+            worker_path_env("/m", ""),
+            vec![(ENV_MODELS_DIR, "/m".into())]
+        );
+        assert_eq!(
+            worker_path_env("  ", "/v"),
+            vec![(ENV_VOICES_DIR, "/v".into())]
+        );
+    }
+
+    /// End-to-end: same env pairs spawn injects are visible inside a child process.
+    #[test]
+    fn worker_path_env_visible_to_child_process() {
+        let pairs = worker_path_env("/custom/models-root", "/custom/voices-root");
+        let mut cmd = Command::new("python3");
+        cmd.args([
+            "-c",
+            "import os; print(os.environ.get('YAPPER_MODELS_DIR','')); print(os.environ.get('YAPPER_VOICES_DIR',''))",
+        ]);
+        for (key, val) in &pairs {
+            cmd.env(key, val);
+        }
+        let out = cmd.output().expect("spawn python3");
+        assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.get(0).copied(), Some("/custom/models-root"));
+        assert_eq!(lines.get(1).copied(), Some("/custom/voices-root"));
     }
 
     #[test]

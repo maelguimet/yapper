@@ -217,6 +217,28 @@ mod tests {
     }
 
     #[test]
+    fn models_dirs_round_trip_custom() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("yapper-cfg-models-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let mut cfg = Config::default();
+        cfg.models.dir = "/opt/yapper/models".into();
+        cfg.models.voices_dir = "/opt/yapper/voices".into();
+        cfg.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.models.dir, "/opt/yapper/models");
+        assert_eq!(loaded.models.voices_dir, "/opt/yapper/voices");
+        let env = crate::ipc::worker_path_env(&loaded.models.dir, &loaded.models.voices_dir);
+        assert!(env.iter().any(|(k, v)| *k == crate::ipc::ENV_MODELS_DIR && v == "/opt/yapper/models"));
+        assert!(env.iter().any(|(k, v)| *k == crate::ipc::ENV_VOICES_DIR && v == "/opt/yapper/voices"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn missing_audio_section_defaults() {
         // Older configs without [audio] must still load.
         let raw = r#"

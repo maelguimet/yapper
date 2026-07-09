@@ -39,6 +39,8 @@ impl WorkerManager {
                     "stt",
                     &self.cfg.paths.python_bin,
                     &self.cfg.paths.python_root,
+                    &self.cfg.models.dir,
+                    &self.cfg.models.voices_dir,
                 )?);
             }
             Role::Tts => {
@@ -49,6 +51,8 @@ impl WorkerManager {
                     "tts",
                     &self.cfg.paths.python_bin,
                     &self.cfg.paths.python_root,
+                    &self.cfg.models.dir,
+                    &self.cfg.models.voices_dir,
                 )?);
             }
         }

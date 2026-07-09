@@ -148,9 +148,14 @@ read_aloud = "Super+Shift+S"
 push_to_talk = "Super+Shift+R"
 
 [models]
-dir = "~/.local/share/yapper/models"
-voices_dir = "~/.local/share/yapper/voices"
+dir = "~/.local/share/yapper/models"          # honored: YAPPER_MODELS_DIR for workers
+voices_dir = "~/.local/share/yapper/voices"   # honored: YAPPER_VOICES_DIR for workers
 ```
+
+Whisper weights live at `{models.dir}/whisper/{small,medium}.pt`. The Rust shell
+passes `models.dir` / `models.voices_dir` into Python via env so path resolution is
+shared by workers, `download_models.py`, `install_voices.sh`, and `yapper doctor`.
+
 
 ## Installer sketch
 

@@ -33,6 +33,10 @@ class SttWorker:
     state: SttState = field(default_factory=SttState)
     download_root: Path | None = None
 
+    def whisper_root(self) -> Path:
+        """Configured Whisper download/load root (``YAPPER_MODELS_DIR``/whisper or XDG)."""
+        return self.download_root or whisper_models_dir()
+
     def handle(self, req: Request) -> Response:
         handlers = {
             "ping": self._ping,
@@ -95,7 +99,7 @@ class SttWorker:
             self._drop_model()
 
         ensure_runtime_dirs()
-        root = self.download_root or whisper_models_dir()
+        root = self.whisper_root()
         root.mkdir(parents=True, exist_ok=True)
 
         try:
