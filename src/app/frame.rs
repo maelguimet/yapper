@@ -110,10 +110,10 @@ impl eframe::App for YapperApp {
             });
 
             if let Some(err) = &self.hotkey_error {
-                ui.colored_label(egui::Color32::from_rgb(255, 210, 80), err);
+                status_chip(ui, err, ChipState::Error);
             }
             if let Some(err) = &self.tray_error {
-                ui.colored_label(egui::Color32::from_rgb(255, 120, 80), err);
+                status_chip(ui, err, ChipState::Error);
             }
             ui.add_space(2.0);
         });
@@ -209,10 +209,16 @@ impl eframe::App for YapperApp {
                             self.transport.toggle_pause();
                         }
                         let stop_enabled = can_stop_tts(tts_busy);
-                        if ui
-                            .add_enabled(stop_enabled, danger_button_widget("Stop"))
-                            .clicked()
-                        {
+                        // Danger fill only when enabled — egui does not mute custom fills.
+                        let stop_btn = if stop_enabled {
+                            ui.add(danger_button_widget("Stop"))
+                        } else {
+                            ui.add_enabled(
+                                false,
+                                egui::Button::new("Stop").min_size(egui::vec2(96.0, 28.0)),
+                            )
+                        };
+                        if stop_btn.clicked() {
                             self.cancel_tts_pipeline();
                             self.status = "playback stopped".into();
                         }

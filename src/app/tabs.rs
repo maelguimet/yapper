@@ -162,6 +162,9 @@ impl YapperApp {
                         .strong()
                         .color(egui::Color32::from_rgb(200, 215, 240)),
                 );
+                if !transport_idle {
+                    ui.weak(format!("  ·  {}", st.as_str()));
+                }
                 if !self.transport.supports_transport_controls()
                     && matches!(st, TransportStatus::Playing | TransportStatus::Paused)
                 {

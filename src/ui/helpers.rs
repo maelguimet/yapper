@@ -276,6 +276,7 @@ pub fn text_panel_rows(available_height: f32, share: f32) -> usize {
 
 /// After any synth request error that may have killed the worker, always refresh model status.
 /// (WorkerManager::synthesize_timeout kills TTS on any request Err.)
+#[cfg(test)]
 pub fn synth_error_resets_worker() -> bool {
     true
 }

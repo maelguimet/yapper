@@ -37,15 +37,7 @@ pub(crate) enum MainTab {
     Settings,
 }
 
-impl MainTab {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            MainTab::Dictate => "Dictate",
-            MainTab::Speak => "Speak",
-            MainTab::Settings => "Settings",
-        }
-    }
-}
+
 
 /// Map an egui key to the hotkey config token (`S`, `1`, `Space`, …).
 pub(crate) fn egui_key_to_token(key: egui::Key) -> Option<&'static str> {

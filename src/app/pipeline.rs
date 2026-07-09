@@ -419,7 +419,7 @@ impl YapperApp {
     fn update_speak_status(&mut self) {
         let transport_idle = matches!(self.transport.status(), TransportStatus::Idle);
         let time = self.transport.machine().format_time_label();
-        self.status = transport_status_line(
+        let mut line = transport_status_line(
             self.tts.active_job.is_some(),
             self.tts.playing_index,
             self.tts.total,
@@ -427,6 +427,12 @@ impl YapperApp {
             &time,
             self.tts.synth_in_flight,
         );
+        // Keep controller progress_label wired for N/M when playing_index lags.
+        let prog = self.tts.progress_label();
+        if !prog.is_empty() && self.tts.active_job.is_some() && !line.contains(&prog) {
+            line = format!("{line} · {prog}");
+        }
+        self.status = line;
     }
 
     fn finalize_tts_job_if_done(&mut self) {

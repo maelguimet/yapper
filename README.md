@@ -8,7 +8,7 @@ Whisper (STT) + Chatterbox multilingual (TTS). No cloud STT/TTS APIs.
 ## Features
 
 - **Always-on system tray** (Open / Load-Unload STT-TTS / Quit). Close or minimize **hides to tray**; process and hotkeys stay alive. **Quit only** via tray → Quit (or confirmed Exit in Settings).
-- GUI tabs: **Speech → Text**, **Text → Speech**, **Settings** (dark theme)
+- GUI tabs: **Dictate**, **Speak**, **Settings** (dark theme, status chips + cards)
 - Load / unload models (free VRAM **and** RAM when unloaded)
 - Model selectors (Whisper small/medium; Chatterbox multilingual)
 - Eve voice + tone picker (from `tts/clone` gold + knobs)
@@ -131,7 +131,7 @@ Rebind in **Settings → Hotkeys**: Capture a combo (or type advanced), then **A
 
 ### Streaming TTS & transport
 
-Long text is split into sentences (EN/FR-aware, abbreviation-safe) and synthesized **one segment at a time**. Playback starts when the first segment is ready. Controls on the Text → Speech tab:
+Long text is split into sentences (EN/FR-aware, abbreviation-safe) and synthesized **one segment at a time**. Playback starts when the first segment is ready. Controls on the **Speak** tab:
 
 | Control | Behavior |
 |---------|----------|
