@@ -127,9 +127,10 @@ python3 -m venv --system-site-packages .venv
 .venv/bin/python scripts/download_models.py small medium
 cargo run -- doctor
 cargo run -- gui
-cd python && PYTHONPATH=. pytest -q -m 'not gpu'
-# optional GPU smokes:
-# cd python && PYTHONPATH=. pytest -q -m gpu
+# non-GPU Python suite (from repo root; markers registered in root pytest.ini)
+PYTHONPATH=python pytest -q -m 'not gpu'
+# equivalent: PYTHONPATH=python pytest -q python/tests -m 'not gpu'
+# optional GPU smokes: PYTHONPATH=python pytest -q -m gpu
 cargo test --locked
 ```
 
