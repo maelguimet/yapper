@@ -249,14 +249,27 @@ impl eframe::App for YapperApp {
                                 Err(e) => self.status = format!("replay error: {e:#}"),
                             }
                         }
+                        // Same restart path as Speak: read_aloud/do_speak → start_speak_job
+                        // (OOB kill when synth_in_flight). Stay enabled while busy so a new
+                        // selection/file can restart immediately.
                         if ui
                             .add_enabled(!self.tts_loading, egui::Button::new("Read selection"))
+                            .on_hover_text(if tts_busy {
+                                "Restart: stop current speech and read selection"
+                            } else {
+                                "Read primary selection (or clipboard if toggled)"
+                            })
                             .clicked()
                         {
                             self.read_aloud();
                         }
                         if ui
                             .add_enabled(!self.tts_loading, egui::Button::new("Speak file…"))
+                            .on_hover_text(if tts_busy {
+                                "Restart: stop current speech and speak file"
+                            } else {
+                                "Load a text file and speak it"
+                            })
                             .clicked()
                         {
                             if let Some(path) = rfd::FileDialog::new()
@@ -361,13 +374,14 @@ impl eframe::App for YapperApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.discard_all_tts_audio();
-        let _ = self.jobs.kill_tts_now();
-        self.jobs.send(super::messages::JobCmd::UnloadAll);
-        self.jobs.send(super::messages::JobCmd::Shutdown);
         if let Some(session) = self.recording.take() {
             let _ = stop_recording(session);
         }
         self.hotkeys = None;
+        // OOB kill + UnloadAll + Shutdown + bounded join (no hang, no orphan workers).
+        let _ = self
+            .jobs
+            .shutdown_bounded(super::live_pids::JOB_SHUTDOWN_JOIN_BUDGET);
     }
 }
 

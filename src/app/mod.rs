@@ -1,6 +1,7 @@
 //! Main egui window + tray orchestration.
 
 mod jobs;
+pub(crate) mod live_pids;
 pub(crate) mod messages;
 mod pipeline;
 mod shell;

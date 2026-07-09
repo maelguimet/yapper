@@ -3,54 +3,18 @@
 //! **Stop mid-generate:** `kill_tts_now()` SIGKILLs the live TTS pid out-of-band so
 //! the UI never waits for the serial job_loop to finish an in-flight synthesize.
 
+use super::live_pids::{
+    job_shutdown_join_exceeded, LiveWorkerPids, JOB_SHUTDOWN_JOIN_BUDGET,
+};
 use super::messages::{AppMsg, JobCmd};
 use crate::config::Config;
-use crate::ipc::kill_os_pid;
 use crate::mpv_backend::wav_duration_secs;
 use crate::policy::Role;
 use crate::workers::WorkerManager;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
-
-/// Shared live worker pids. UI can SIGKILL without waiting on the job thread.
-#[derive(Debug, Default)]
-pub struct LiveWorkerPids {
-    /// 0 = none
-    tts: AtomicU32,
-    stt: AtomicU32,
-}
-
-impl LiveWorkerPids {
-    pub fn set_tts(&self, pid: Option<u32>) {
-        self.tts.store(pid.unwrap_or(0), Ordering::SeqCst);
-    }
-
-    pub fn set_stt(&self, pid: Option<u32>) {
-        self.stt.store(pid.unwrap_or(0), Ordering::SeqCst);
-    }
-
-    /// Immediately SIGKILL the TTS worker process (if registered).
-    /// Returns true if a kill was attempted.
-    pub fn kill_tts_now(&self) -> bool {
-        let pid = self.tts.swap(0, Ordering::SeqCst);
-        if pid == 0 {
-            return false;
-        }
-        kill_os_pid(pid);
-        true
-    }
-
-    /// Peek registered TTS pid (used by tests; available for diagnostics).
-    #[cfg(test)]
-    pub fn peek_tts_pid(&self) -> Option<u32> {
-        match self.tts.load(Ordering::SeqCst) {
-            0 => None,
-            p => Some(p),
-        }
-    }
-}
+use std::time::{Duration, Instant};
 
 /// Handle for posting work and draining results from the UI thread.
 pub struct JobHub {
@@ -58,6 +22,8 @@ pub struct JobHub {
     msg_rx: Receiver<AppMsg>,
     /// Out-of-band kill registry (shared with job_loop).
     live: Arc<LiveWorkerPids>,
+    /// Jobs thread handle; taken once during bounded shutdown.
+    join: Option<thread::JoinHandle<()>>,
 }
 
 impl JobHub {
@@ -66,7 +32,7 @@ impl JobHub {
         let (msg_tx, msg_rx) = mpsc::channel::<AppMsg>();
         let live = Arc::new(LiveWorkerPids::default());
         let live_bg = Arc::clone(&live);
-        thread::Builder::new()
+        let join = thread::Builder::new()
             .name("yapper-jobs".into())
             .spawn(move || job_loop(cfg, cmd_rx, msg_tx, live_bg))
             .expect("spawn yapper-jobs thread");
@@ -74,6 +40,7 @@ impl JobHub {
             cmd_tx,
             msg_rx,
             live,
+            join: Some(join),
         }
     }
 
@@ -87,6 +54,39 @@ impl JobHub {
     /// policy/client state is cleaned when the job thread resumes.
     pub fn kill_tts_now(&self) -> bool {
         self.live.kill_tts_now()
+    }
+
+    /// Out-of-band kill of STT + TTS worker processes (hard quit).
+    pub fn kill_all_now(&self) -> bool {
+        self.live.kill_all_now()
+    }
+
+    /// Hard quit path: OOB kill workers, unload, shutdown jobs thread, join
+    /// with a short deadline. Returns true if the jobs thread joined in time.
+    /// Never blocks longer than `budget` (plus negligible channel overhead).
+    pub fn shutdown_bounded(&mut self, budget: Duration) -> bool {
+        let _ = self.live.kill_all_now();
+        let _ = self.cmd_tx.send(JobCmd::UnloadAll);
+        let _ = self.cmd_tx.send(JobCmd::Shutdown);
+        let Some(handle) = self.join.take() else {
+            return true;
+        };
+        // std JoinHandle has no join_timeout; wait via side channel.
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = handle.join();
+            let _ = done_tx.send(());
+        });
+        let t0 = Instant::now();
+        match done_rx.recv_timeout(budget) {
+            Ok(()) => true,
+            Err(_) => {
+                // Budget exhausted: do not hang. Worker PIDs already killed.
+                debug_assert!(job_shutdown_join_exceeded(t0.elapsed(), budget));
+                let _ = job_shutdown_join_exceeded(t0.elapsed(), budget);
+                false
+            }
+        }
     }
 
     /// Non-blocking drain of all pending messages.
@@ -108,7 +108,11 @@ impl JobHub {
 
 impl Drop for JobHub {
     fn drop(&mut self) {
-        let _ = self.cmd_tx.send(JobCmd::Shutdown);
+        if self.join.is_some() {
+            let _ = self.shutdown_bounded(JOB_SHUTDOWN_JOIN_BUDGET);
+        } else {
+            let _ = self.cmd_tx.send(JobCmd::Shutdown);
+        }
     }
 }
 
@@ -305,7 +309,6 @@ pub fn synth_error_clears_loaded_badge() -> bool {
 mod tests {
     use super::*;
     use super::super::messages::{is_live_tts_job, AppMsg};
-    use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -345,34 +348,20 @@ mod tests {
         assert!(synth_error_clears_loaded_badge());
     }
 
-    /// Registry kill path used by Stop/Restart: hanging process dies within ~1s.
+    /// Idle JobHub must shut down and join well under the hard-quit budget.
     #[test]
-    fn live_worker_pids_kill_tts_interrupts_within_1s() {
-        let mut child = Command::new("bash")
-            .args(["-c", "sleep 120"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn sleeper");
-        let pid = child.id();
-        let reg = LiveWorkerPids::default();
-        reg.set_tts(Some(pid));
-        assert_eq!(reg.peek_tts_pid(), Some(pid));
-
+    fn shutdown_bounded_joins_idle_hub() {
+        let cfg = Config::default();
+        let mut hub = JobHub::start(cfg);
         let t0 = Instant::now();
-        assert!(reg.kill_tts_now(), "must attempt kill");
-        assert!(reg.peek_tts_pid().is_none());
-
-        // Reap; should not hang if kill worked.
-        let status = child.wait().expect("wait child");
+        let joined = hub.shutdown_bounded(JOB_SHUTDOWN_JOIN_BUDGET);
         let elapsed = t0.elapsed();
+        assert!(joined, "idle jobs thread must join");
         assert!(
-            elapsed < Duration::from_secs(1),
-            "kill must finish within 1s, took {elapsed:?}; status={status:?}"
+            elapsed < JOB_SHUTDOWN_JOIN_BUDGET,
+            "join took {elapsed:?}, budget {JOB_SHUTDOWN_JOIN_BUDGET:?}"
         );
-        assert!(!status.success() || status.code() != Some(0) || true);
-        // Process is reaped; second kill is a no-op.
-        assert!(!reg.kill_tts_now());
+        // Second call is a no-op (handle already taken).
+        assert!(hub.shutdown_bounded(Duration::from_millis(50)));
     }
 }

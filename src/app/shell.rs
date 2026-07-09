@@ -89,6 +89,8 @@ impl YapperApp {
         }
         self.hard_quit_armed = true;
         self.discard_all_tts_audio();
+        // Immediate OOB kill so mid-generate cannot block unload; on_exit joins.
+        let _ = self.jobs.kill_all_now();
         self.jobs.send(crate::app::messages::JobCmd::UnloadAll);
         self.jobs.send(crate::app::messages::JobCmd::Shutdown);
         if let Some(session) = self.recording.take() {
