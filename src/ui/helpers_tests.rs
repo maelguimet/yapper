@@ -123,10 +123,49 @@ fn tts_text_stats_counts_and_warns() {
     assert_eq!(s1, "1 character");
     let long: String = "a".repeat(TTS_LONG_TEXT_WARN_CHARS);
     let (_, w) = tts_text_stats(&long);
-    assert!(w.unwrap().contains("Long paste"));
+    let long_warn = w.unwrap();
+    assert!(long_warn.contains("Long paste"), "{long_warn}");
+    // Short one-line warn — no multi-sentence essay crowding Speak chrome.
+    assert!(!long_warn.contains(';'), "{long_warn}");
+    assert!(long_warn.chars().count() < 80, "{long_warn}");
     let huge: String = "b".repeat(TTS_VERY_LONG_TEXT_CHARS);
     let (_, w2) = tts_text_stats(&huge);
-    assert!(w2.unwrap().contains("Very long"));
+    let huge_warn = w2.unwrap();
+    assert!(huge_warn.contains("Very long"), "{huge_warn}");
+    assert!(!huge_warn.contains(';'), "{huge_warn}");
+    assert!(huge_warn.chars().count() < 80, "{huge_warn}");
+}
+
+#[test]
+fn settings_model_status_is_not_debug_slop() {
+    assert_eq!(
+        settings_model_status(true, false, None),
+        "loading…"
+    );
+    assert_eq!(
+        settings_model_status(false, false, None),
+        "not loaded"
+    );
+    assert_eq!(
+        settings_model_status(false, true, Some("small")),
+        "small"
+    );
+    assert_eq!(
+        settings_model_status(false, true, Some("  medium  ")),
+        "medium"
+    );
+    assert_eq!(settings_model_status(false, true, None), "ready");
+    assert_eq!(settings_model_status(false, true, Some("")), "ready");
+    // Must not emit the old "Active: loaded" debug-style chrome.
+    for s in [
+        settings_model_status(false, true, None),
+        settings_model_status(false, false, None),
+        settings_model_status(true, false, None),
+    ] {
+        assert!(!s.contains("Active:"), "{s}");
+        assert_ne!(s, "loaded");
+        assert_ne!(s, "unloaded");
+    }
 }
 
 #[test]

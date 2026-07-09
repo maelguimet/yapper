@@ -287,12 +287,10 @@ impl eframe::App for YapperApp {
                         }
                     }
                     MainTab::Settings => {
+                        // Hide lives only in the top strip (avoid duplicate chrome).
                         if ui.button("Save settings").clicked() {
                             self.persist();
                             self.status = "settings saved".into();
-                        }
-                        if ui.button("Hide").clicked() {
-                            self.hide_to_tray(ctx);
                         }
                         if ui.button("Exit…").clicked() {
                             self.exit_prompt = self.exit_prompt.on_exit_clicked();

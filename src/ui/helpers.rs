@@ -143,13 +143,9 @@ pub fn tts_text_stats(text: &str) -> (String, Option<String>) {
         format!("{n} characters")
     };
     let warn = if n >= TTS_VERY_LONG_TEXT_CHARS {
-        Some(format!(
-            "Very long text ({n} chars) — synthesis may take a while; streaming splits by sentence."
-        ))
+        Some(format!("Very long ({n} chars) — may take a while."))
     } else if n >= TTS_LONG_TEXT_WARN_CHARS {
-        Some(format!(
-            "Long paste ({n} chars) — first audio after the first sentence when streaming."
-        ))
+        Some(format!("Long paste ({n} chars) — streams by sentence."))
     } else {
         None
     };
@@ -264,6 +260,24 @@ pub fn load_status_label(role: &str, loaded: bool, model_id: Option<&str>) -> St
         }
     } else {
         format!("{role} - unloaded")
+    }
+}
+
+/// Compact Settings model-row status (no debug-ish "Active: loaded").
+pub fn settings_model_status(
+    loading: bool,
+    loaded: bool,
+    model_id: Option<&str>,
+) -> String {
+    if loading {
+        return "loading…".into();
+    }
+    if !loaded {
+        return "not loaded".into();
+    }
+    match model_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => "ready".into(),
     }
 }
 

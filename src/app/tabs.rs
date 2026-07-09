@@ -4,9 +4,9 @@ use super::{HotkeyCaptureField, YapperApp, MIC_LABEL_MAX_CHARS};
 use crate::segment::estimate_segment_count;
 use crate::transport::TransportStatus;
 use crate::ui::{
-    card, form_row, helper_text, primary_button, stt_empty_guidance, stt_guidance_is_warning,
-    text_panel_rows, toolbar_row, transport_status_line, truncate_display, tts_empty_guidance,
-    tts_guidance_is_warning, tts_text_stats,
+    card, form_row, helper_text, primary_button, settings_model_status, stt_empty_guidance,
+    stt_guidance_is_warning, text_panel_rows, toolbar_row, transport_status_line, truncate_display,
+    tts_empty_guidance, tts_guidance_is_warning, tts_text_stats,
 };
 use eframe::egui;
 
@@ -104,7 +104,7 @@ impl YapperApp {
                 egui::TextEdit::multiline(&mut self.transcript)
                     .desired_width(f32::INFINITY)
                     .desired_rows(rows)
-                    .hint_text("Record or transcribe a file — text appears here…"),
+                    .hint_text("Transcript appears here…"),
             );
         });
     }
@@ -138,10 +138,8 @@ impl YapperApp {
                             ui.selectable_value(&mut self.tts_tone, t.clone(), t);
                         }
                     });
-                ui.checkbox(
-                    &mut self.read_clipboard,
-                    "Read clipboard (else selection)",
-                );
+                ui.checkbox(&mut self.read_clipboard, "Prefer clipboard")
+                    .on_hover_text("When off, read-aloud uses the primary selection");
             });
         });
 
@@ -217,10 +215,10 @@ impl YapperApp {
                         .color(egui::Color32::from_rgb(150, 195, 255)),
                 );
                 ui.weak(format!("{stats} · ~{segs} sentence(s)"));
-                if let Some(w) = &warn {
-                    ui.colored_label(egui::Color32::from_rgb(255, 190, 90), w);
-                }
             });
+            if let Some(w) = &warn {
+                ui.colored_label(egui::Color32::from_rgb(255, 190, 90), w);
+            }
             ui.add_space(6.0);
             let avail = ui.available_size();
             ui.add_sized(
@@ -235,10 +233,7 @@ impl YapperApp {
 
     pub(crate) fn ui_tab_settings(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         card(ui, "Models", |ui| {
-            helper_text(
-                ui,
-                "Dictate and Speak load models on first use. Manual unload frees VRAM.",
-            );
+            helper_text(ui, "Models load on first use; unload frees VRAM.");
             ui.add_space(6.0);
             form_row(ui, "Dictation model", |ui| {
                 egui::ComboBox::from_id_salt("stt_model")
@@ -247,25 +242,19 @@ impl YapperApp {
                         ui.selectable_value(&mut self.stt_model, "small".into(), "small");
                         ui.selectable_value(&mut self.stt_model, "medium".into(), "medium");
                     });
-                ui.label(format!(
-                    "Active: {}",
-                    self.stt_model_id
-                        .as_deref()
-                        .unwrap_or(if self.stt_loading { "loading" } else { "unloaded" })
+                ui.weak(settings_model_status(
+                    self.stt_loading,
+                    self.stt_loaded,
+                    self.stt_model_id.as_deref(),
                 ));
             });
             ui.add_space(4.0);
             form_row(ui, "Voice model", |ui| {
                 ui.weak("chatterbox-multilingual");
-                ui.label(format!(
-                    "Active: {}",
-                    if self.tts_loading {
-                        "loading"
-                    } else if self.tts_loaded {
-                        "loaded"
-                    } else {
-                        "unloaded"
-                    }
+                ui.weak(settings_model_status(
+                    self.tts_loading,
+                    self.tts_loaded,
+                    self.tts_model_id.as_deref(),
                 ));
             });
             ui.add_space(6.0);

@@ -8,7 +8,8 @@ pub fn apply_yapper_theme(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.window_fill = egui::Color32::from_rgb(22, 24, 28);
     visuals.panel_fill = egui::Color32::from_rgb(28, 31, 36);
-    visuals.extreme_bg_color = egui::Color32::from_rgb(18, 20, 24);
+    // Slightly above pure black so multiline TextEdit does not feel abyss-like.
+    visuals.extreme_bg_color = egui::Color32::from_rgb(26, 30, 36);
     visuals.faint_bg_color = egui::Color32::from_rgb(36, 40, 48);
     visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(36, 40, 48);
     visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(48, 54, 64);
