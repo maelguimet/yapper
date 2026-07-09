@@ -1,9 +1,11 @@
-"""Tone map / knobs load from real gold bank when present."""
+"""Tone map / knobs load — pure tests + optional host asset check."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+
+import pytest
 
 from yapper_tts.tones import (
     DEFAULT_TONES,
@@ -19,10 +21,29 @@ def test_list_tones_non_empty() -> None:
     assert "neutral" in tones
 
 
-def test_resolve_neutral_has_wav_and_knobs() -> None:
-    tone = resolve_tone("neutral")
+def test_resolve_neutral_from_temp_voices(tmp_path: Path) -> None:
+    """Pure: resolve_tone works when a fake WAV exists under voices_root."""
+    wav = tmp_path / "eve_neutral.wav"
+    wav.write_bytes(b"RIFF....WAVE")
+    knobs = {"neutral": {"exg": 0.4, "cfg": 0.5, "rate": 1.0}}
+    (tmp_path / "knobs.json").write_text(json.dumps(knobs), encoding="utf-8")
+    tone = resolve_tone("neutral", voices_root=tmp_path)
     assert tone.name == "neutral"
     assert tone.ref_wav.is_file()
+    assert 0.0 < tone.exaggeration <= 1.5
+    assert 0.0 < tone.cfg_weight <= 1.5
+
+
+@pytest.mark.integration
+def test_resolve_neutral_has_wav_and_knobs() -> None:
+    """Host asset check: real Eve neutral under app voices dir."""
+    try:
+        tone = resolve_tone("neutral")
+    except FileNotFoundError as exc:
+        pytest.skip(f"Eve voice assets missing: {exc}")
+    if not tone.ref_wav.is_file():
+        pytest.skip(f"missing ref wav: {tone.ref_wav}")
+    assert tone.name == "neutral"
     assert 0.0 < tone.exaggeration <= 1.5
     assert 0.0 < tone.cfg_weight <= 1.5
 

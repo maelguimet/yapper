@@ -1,4 +1,7 @@
-"""Sanitize free-form text before Chatterbox synthesis (B21/B25)."""
+"""Sanitize free-form text before Chatterbox synthesis (B21/B25).
+
+Must stay aligned with Rust `src/textprep.rs` via shared golden fixtures.
+"""
 
 from __future__ import annotations
 
@@ -16,13 +19,17 @@ The permanent EUnderclass is already here 🇪🇺"""
 
 B25_TTS_FIXTURE = "This is a test. Does the TTS work?"
 
+# French lowercase fixture — `eu` must not expand.
+FRENCH_EU_FIXTURE = "j'ai eu peur."
+
 _HANDLE_ONLY = re.compile(r"^@\w+$")
 _HANDLE_INLINE = re.compile(r"@\w+")
+# Case-aware: TTS/STT/GPT any case; EU uppercase-only (French "eu" is a word).
 _ACRONYMS = (
     (re.compile(r"\bTTS\b", re.IGNORECASE), "T T S"),
     (re.compile(r"\bSTT\b", re.IGNORECASE), "S T T"),
     (re.compile(r"\bGPT\b", re.IGNORECASE), "G P T"),
-    (re.compile(r"\bEU\b"), "E U"),
+    (re.compile(r"\bEU\b"), "E U"),  # no IGNORECASE — preserve French "eu"
 )
 _MULTI_WS = re.compile(r"\s+")
 
@@ -76,5 +83,6 @@ def _keep_char(ch: str) -> bool:
 __all__ = [
     "B21_SOCIAL_FIXTURE",
     "B25_TTS_FIXTURE",
+    "FRENCH_EU_FIXTURE",
     "sanitize_for_tts",
 ]

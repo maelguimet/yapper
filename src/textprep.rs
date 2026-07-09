@@ -100,17 +100,28 @@ fn collapse_ws(s: &str) -> String {
     out.trim().to_string()
 }
 
+/// Case rules for acronym expansion.
+#[derive(Clone, Copy)]
+enum AcronymCase {
+    /// Expand only when the token is fully uppercase (`EU`, not French `eu`).
+    UpperOnly,
+    /// Expand case-insensitively (`tts` / `TTS` / `Tts` → spelled out).
+    AnyCase,
+}
+
 /// Expand acronyms that Chatterbox tends to mispronounce (B25: TTS → "tits").
 ///
 /// Walks **Unicode scalar values** (not raw UTF-8 bytes). Byte-index expansion
 /// was corrupting FR accents on the real `do_speak` path (`Café` → `CafÃ©`).
+///
+/// `EU` is uppercase-only so French lowercase `eu` ("had") is left alone.
 fn expand_acronyms(s: &str) -> String {
-    /// (ASCII acronym, spoken expansion). Longer entries first so TTS wins over…
-    const ACRONYMS: &[(&str, &str)] = &[
-        ("TTS", "T T S"),
-        ("STT", "S T T"),
-        ("GPT", "G P T"),
-        ("EU", "E U"),
+    /// (ASCII acronym, spoken expansion, case rule). Longer entries first.
+    const ACRONYMS: &[(&str, &str, AcronymCase)] = &[
+        ("TTS", "T T S", AcronymCase::AnyCase),
+        ("STT", "S T T", AcronymCase::AnyCase),
+        ("GPT", "G P T", AcronymCase::AnyCase),
+        ("EU", "E U", AcronymCase::UpperOnly),
     ];
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len() + 16);
@@ -131,17 +142,26 @@ fn expand_acronyms(s: &str) -> String {
 fn match_acronym_at<'a>(
     chars: &[char],
     i: usize,
-    acronyms: &'a [(&str, &str)],
+    acronyms: &'a [(&str, &str, AcronymCase)],
 ) -> Option<(&'a str, usize)> {
-    for &(acr, repl) in acronyms {
+    for &(acr, repl, case_rule) in acronyms {
         let n = acr.chars().count();
         if i + n > chars.len() {
             continue;
         }
-        let matched = acr.chars().enumerate().all(|(j, a)| {
-            let c = chars[i + j];
-            c.is_ascii() && a.to_ascii_uppercase() == c.to_ascii_uppercase()
-        });
+        let slice = &chars[i..i + n];
+        let matched = match case_rule {
+            AcronymCase::UpperOnly => {
+                // Token must equal the uppercase form exactly (ASCII).
+                acr.chars()
+                    .enumerate()
+                    .all(|(j, a)| slice[j].is_ascii() && slice[j] == a)
+            }
+            AcronymCase::AnyCase => acr.chars().enumerate().all(|(j, a)| {
+                let c = slice[j];
+                c.is_ascii() && a.to_ascii_uppercase() == c.to_ascii_uppercase()
+            }),
+        };
         if !matched {
             continue;
         }
@@ -173,6 +193,7 @@ pub fn regression_fixtures() -> &'static [(&'static str, &'static str)] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn b21_social_does_not_panic_and_is_speakable() {
@@ -251,5 +272,50 @@ mod tests {
         assert!(out2.contains('ç') || out2.contains("fran"), "got {out2:?}");
         assert!(out2.contains("E U"), "got {out2:?}");
         assert!(!out2.contains('Ã'), "got {out2:?}");
+    }
+
+    #[test]
+    fn french_lowercase_eu_not_expanded() {
+        // French "eu" (past of avoir) must not become "E U".
+        let out = sanitize_for_tts("j'ai eu peur.");
+        assert_eq!(out, "j'ai eu peur.");
+        assert!(!out.contains("E U"), "lowercase eu must stay: {out}");
+        let out2 = sanitize_for_tts("Bonjour. J'ai eu peur, mais maintenant ça va.");
+        assert!(out2.contains("eu"), "got {out2:?}");
+        assert!(!out2.contains("E U"), "got {out2:?}");
+    }
+
+    #[test]
+    fn uppercase_eu_still_expanded() {
+        let out = sanitize_for_tts("EU rules");
+        assert!(out.contains("E U"), "got {out:?}");
+        assert!(!out.split_whitespace().any(|w| w == "EU"), "got {out:?}");
+    }
+
+    #[test]
+    fn lowercase_tts_stt_gpt_still_expanded() {
+        let out = sanitize_for_tts("try tts and stt with gpt");
+        assert!(out.contains("T T S"), "got {out:?}");
+        assert!(out.contains("S T T"), "got {out:?}");
+        assert!(out.contains("G P T"), "got {out:?}");
+    }
+
+    #[test]
+    fn golden_sanitize_fixtures_match_expected() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/sanitize");
+        let cases = std::fs::read_to_string(root.join("cases.txt")).expect("cases.txt");
+        let expected = std::fs::read_to_string(root.join("expected_rust.txt"))
+            .or_else(|_| std::fs::read_to_string(root.join("expected.txt")))
+            .expect("expected fixtures");
+        let inputs: Vec<&str> = cases.split("\n---\n").collect();
+        let wants: Vec<&str> = expected.split("\n---\n").collect();
+        assert_eq!(inputs.len(), wants.len(), "fixture count mismatch");
+        for (raw, want) in inputs.iter().zip(wants.iter()) {
+            assert_eq!(
+                sanitize_for_tts(raw),
+                want.trim(),
+                "input={raw:?}"
+            );
+        }
     }
 }

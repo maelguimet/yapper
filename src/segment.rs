@@ -7,8 +7,11 @@ pub const DEFAULT_MAX_CHUNK_CHARS: usize = 280;
 ///
 /// Rules:
 /// - Prefer sentence boundaries `.?!…` and French `«»` / `:` pauses when reasonable.
+/// - Soft-break on clause punctuation (`,`, `;`, `:`) near the hard limit.
 /// - Keep common abbreviations from ending a segment early (Mr., Dr., etc.).
 /// - Cap chunk length; hard-split long runs on whitespace when needed.
+/// - Non-final hard-split segments without terminal punctuation get a light
+///   synth-only period so generative TTS is less likely to invent a tail.
 /// - Preserve order; drop empty segments; trim whitespace.
 pub fn split_for_tts(text: &str) -> Vec<String> {
     split_for_tts_with_limit(text, DEFAULT_MAX_CHUNK_CHARS)
@@ -57,6 +60,23 @@ pub fn split_for_tts_with_limit(text: &str, max_chars: usize) -> Vec<String> {
             buf.clear();
         }
 
+        // Prefer clause boundaries when approaching the hard cap.
+        let buf_len = buf.chars().count();
+        if buf_len >= max_chars.saturating_mul(3) / 4
+            && is_clause_break(ch)
+            && next_is_space_or_end
+            && buf_len >= 40
+        {
+            push_segment(&mut segments, &buf, max_chars);
+            buf.clear();
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            i = j;
+            continue;
+        }
+
         // Hard cap: flush at last whitespace if over limit
         if buf.chars().count() >= max_chars {
             push_segment(&mut segments, &buf, max_chars);
@@ -68,7 +88,36 @@ pub fn split_for_tts_with_limit(text: &str, max_chars: usize) -> Vec<String> {
     if !buf.trim().is_empty() {
         push_segment(&mut segments, &buf, max_chars);
     }
+    ensure_nonfinal_terminal_punct(&mut segments);
     segments
+}
+
+fn is_clause_break(ch: char) -> bool {
+    matches!(ch, ',' | ';' | ':')
+}
+
+/// Append a light period to non-final segments that lack terminal punctuation.
+/// Helps generative TTS treat hard-split mid-thought chunks as complete.
+fn ensure_nonfinal_terminal_punct(segments: &mut [String]) {
+    if segments.len() < 2 {
+        return;
+    }
+    let last = segments.len() - 1;
+    for seg in segments.iter_mut().take(last) {
+        let trimmed = seg.trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let last_ch = trimmed.chars().last().unwrap_or(' ');
+        if is_sentence_ender(last_ch) || is_clause_break(last_ch) {
+            continue;
+        }
+        // Don't double-punctuate closers like quotes after a period already handled.
+        if matches!(last_ch, '"' | '\'' | '»' | ')' | ']' | '”' | '’') {
+            continue;
+        }
+        seg.push('.');
+    }
 }
 
 fn is_sentence_ender(ch: char) -> bool {
@@ -221,5 +270,34 @@ mod tests {
         let t = "One. Two. Three.";
         assert_eq!(estimate_segment_count(t), split_for_tts(t).len());
         assert_eq!(estimate_segment_count(""), 0);
+    }
+
+    #[test]
+    fn hard_split_nonfinal_gets_terminal_punct() {
+        // Long run with no sentence enders — hard split must leave non-final
+        // chunks with a period so TTS is less likely to invent a tail.
+        let words: Vec<&str> = (0..60).map(|_| "word").collect();
+        let long = words.join(" ");
+        let segs = split_for_tts_with_limit(&long, 80);
+        assert!(segs.len() > 1, "{segs:?}");
+        for (i, s) in segs.iter().enumerate() {
+            if i + 1 < segs.len() {
+                let last = s.chars().last().unwrap_or(' ');
+                assert!(
+                    is_sentence_ender(last) || is_clause_break(last),
+                    "non-final seg {i} lacks terminal punct: {s:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prefers_clause_break_before_hard_limit() {
+        let text = format!(
+            "{}, and then more words keep going past the limit without a period so we split",
+            "clause phrase".repeat(8)
+        );
+        let segs = split_for_tts_with_limit(&text, 100);
+        assert!(segs.len() >= 2, "{segs:?}");
     }
 }
