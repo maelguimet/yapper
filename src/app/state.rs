@@ -170,7 +170,7 @@ impl YapperApp {
             mic_list_error: None,
             mic_source,
             record_level: 0.0,
-            main_tab: MainTab::Dictate,
+            main_tab: super::parse_start_tab_env().unwrap_or(MainTab::Dictate),
             theme_applied: false,
             last_saved_prefs,
             autosave_retry_after: None,

@@ -17,6 +17,11 @@ impl eframe::App for YapperApp {
         if !self.theme_applied {
             apply_yapper_theme(ctx);
             self.theme_applied = true;
+            // Honor YAPPER_WINDOW_SIZE after create (DE may ignore builder size).
+            if let Some((w, h)) = super::parse_window_size_env() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+            }
         }
 
         pump_gtk_events();
