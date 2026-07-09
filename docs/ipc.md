@@ -68,6 +68,14 @@ or
 - Parent queues if needed.
 - `load`/`unload` must not race with `transcribe`/`synthesize` (parent serializes).
 
+## Chunked TTS (parent-side, v0.2)
+
+Worker protocol is unchanged: still one `synthesize` per request with a single `text` string.
+
+The **parent** (`segment::split_for_tts`) splits long monologues into sentences and issues sequential `synthesize` calls (one segment → one temp WAV → `AudioTransport` play). Status text surfaces `synthesizing i/n`. Cancel clears the parent queue and stops the player; in-flight synthesize may still finish but is not played if cancelled before queue pump.
+
+No new worker commands are required for v0.2 streaming.
+
 ## Versioning
 
 Add `"proto": 1` on first request after spawn; mismatch → parent errors and restarts worker.

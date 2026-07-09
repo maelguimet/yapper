@@ -8,12 +8,24 @@ A self-contained Linux **tray application** for local speech-to-text and text-to
 
 Primarily the machine owner on Pop!_OS / Ubuntu GNOME **X11** with an NVIDIA GPU. Installer should work on similar environments with documented prerequisites.
 
-## Non-goals (v1)
+## Non-goals (v0.2 primary)
 
 - LLM-directed multi-emotion narration (`projects/tts/narrate`)
-- Wayland support
+- Wayland support (Phase 13 follow-on)
 - Perfect multi-distro packaging
 - Embedding multi-GB weights in git
+
+## Always-on tray (v0.2)
+
+- Window close / minimize → hide (`Visible(false)`); process stays up.
+- Tray **Open** → show + focus; tray **Quit** → hard exit only.
+- In-window **Exit…** requires confirmation (same as tray Quit).
+
+## Chunked TTS + transport (v0.2)
+
+- Parent splits text (`segment::split_for_tts`) and loops `synthesize` per sentence.
+- Playback via `transport::AudioTransport` (mpv IPC preferred): pause / seek / replay / volume.
+- Status: idle | buffering | speaking | paused; queue length surfaced in UI.
 
 ## Components
 
@@ -71,7 +83,7 @@ GUI shows human-readable tone list (Neutral, Calm, Excited, …). Changing tone 
 2. If “read clipboard” toggle on → `CLIPBOARD`; else → `PRIMARY` selection (`xclip -selection primary`)
 3. If empty, notify and stop
 4. Ensure TTS loaded (may unload STT if needed)
-5. Synthesize → play audio
+5. Split into segments → synthesize first → play; continue queue (streaming path)
 6. Do not steal focus aggressively
 
 ### Hold-to-talk insert

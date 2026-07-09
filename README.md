@@ -3,16 +3,18 @@
 Local **speech-to-text** and **text-to-speech** tray app for Linux.  
 Whisper (STT) + Chatterbox multilingual (TTS). No cloud STT/TTS APIs.
 
-> Status: **v0.1.0** — workers, GUI, hotkeys, installer on Pop/Ubuntu X11 + NVIDIA CUDA.
+> Status: **v0.2 (X11)** — always-on tray, rebindable hotkeys, streaming TTS, transport controls.
 
 ## Features
 
-- System tray icon (Open / Load-Unload STT-TTS / Quit)
-- GUI: STT ↔ copyable text, paste/type → TTS, file STT, file TTS
-- Load / unload models (free VRAM **and** RAM when unloaded; workers stay up)
+- **Always-on system tray** (Open / Load-Unload STT-TTS / Quit). Close or minimize **hides to tray**; process and hotkeys stay alive. **Quit only** via tray → Quit (or confirmed Exit in Settings).
+- GUI tabs: **Speech → Text**, **Text → Speech**, **Settings** (dark theme)
+- Load / unload models (free VRAM **and** RAM when unloaded)
 - Model selectors (Whisper small/medium; Chatterbox multilingual)
 - Eve voice + tone picker (from `tts/clone` gold + knobs)
-- Global hotkeys (rebindable):
+- **Streaming / chunked TTS**: long text is split into sentences; first audio starts after the first segment
+- **Playback transport**: Play / Pause / Resume / Stop / Replay, progress scrubber, volume (mpv IPC; falls back to ffplay/paplay)
+- Global hotkeys (rebindable; Capture picker + Apply):
   - **Super+Shift+S** — read selected text aloud (optional: clipboard)
   - **Super+Shift+R** — hold-to-talk → insert transcript at cursor (no auto-send)
 - Installer with optional start-on-boot (current user or all users)
@@ -25,11 +27,12 @@ Whisper (STT) + Chatterbox multilingual (TTS). No cloud STT/TTS APIs.
 |-------------|-----|
 | Linux **x86_64** | Supported target |
 | **X11** session | Global hotkeys, selection, paste injection |
-| **GNOME** (or DE with AppIndicator/SNI tray) | Tray icon |
+| **GNOME** (or DE with AppIndicator/SNI tray) | Always-on tray icon (StatusNotifier) |
 | **NVIDIA GPU + CUDA-capable drivers** (`nvidia-smi`) | Fast local models |
 | **Rust** toolchain (`rustc`, `cargo`) | Build the app |
 | **Python 3.10+** | STT/TTS workers |
-| **ffmpeg** | Audio decode/encode helpers |
+| **ffmpeg** (+ **ffplay** optional fallback) | Audio helpers |
+| **mpv** (preferred) | Controllable TTS playback (pause/seek) |
 | **arecord** (`alsa-utils`) | Mic capture (Pulse/PipeWire via ALSA plugin) |
 | **xclip**, **xdotool** | Clipboard/selection and paste-at-cursor |
 | **PulseAudio or PipeWire** (Pulse compat) | Mic + playback |
@@ -43,11 +46,12 @@ sudo apt install -y \
   build-essential pkg-config \
   libgtk-3-dev libayatana-appindicator3-dev \
   libx11-dev libxi-dev libxtst-dev \
-  ffmpeg alsa-utils xclip xdotool \
+  ffmpeg mpv alsa-utils xclip xdotool \
   python3 python3-venv python3-dev \
   portaudio19-dev
 # NVIDIA driver already working: nvidia-smi
 # Rust: https://rustup.rs
+# GNOME tray: gnome-shell-extension-appindicator (often preinstalled on Pop/Ubuntu)
 ```
 
 ### Optional
@@ -55,11 +59,22 @@ sudo apt install -y \
 - Existing Eve voice bank at `~/projects/tts/clone` (installer copies/symlinks tones)
 - Extra VRAM headroom (RTX 4070 12 GB class is fine if you unload when using other GPU apps)
 
-### Not supported in v1
+### Always-on tray (required for ship UX)
 
-- Wayland-only sessions
+Yapper is a **tray app**, not a document window:
+
+1. Launch → tray icon appears (GNOME needs **AppIndicator / StatusNotifier** host).
+2. Window **close (X)** or **minimize** → window hides; tray + hotkeys + models stay.
+3. Tray **Open** → show + focus window.
+4. Tray **Quit** → only hard exit (unloads models).
+
+If the tray icon is missing, `yapper doctor` reports host/lib status and the GUI shows a loud error. Install/enable `gnome-shell-extension-appindicator` (package) / `ubuntu-appindicators@ubuntu.com` on GNOME.
+
+### Not supported in v0.2 primary
+
+- Wayland-only sessions (Phase 13 follow-on)
 - macOS / Windows
-- Running without a tray/status-notifier host (GUI still works)
+- Silent success without a tray host (GUI still runs, but always-on UX is broken — doctor warns)
 
 ## Install
 
@@ -112,7 +127,22 @@ echo '{"id":"1","cmd":"list_tones"}' | PYTHONPATH=python .venv/bin/python -m yap
 | Read aloud | `Super+Shift+S` | Primary selection by default; toggle clipboard in GUI |
 | Hold-to-talk | `Super+Shift+R` | Press start / release stop → insert via clipboard+ctrl+v |
 
-Rebind in the GUI (persists to config). Grab failures show a yellow warning in the window.
+Rebind in **Settings → Hotkeys**: Capture a combo (or type advanced), then **Apply hotkeys**. Apply drops previous X11 grabs and registers the new ones live. Grab failures stay as a yellow banner until fixed (DE conflict or bad combo). Defaults and host examples (`Alt+Shift+S` / `Alt+Shift+Q`) parse the same way.
+
+### Streaming TTS & transport
+
+Long text is split into sentences (EN/FR-aware, abbreviation-safe) and synthesized **one segment at a time**. Playback starts when the first segment is ready. Controls on the Text → Speech tab:
+
+| Control | Behavior |
+|---------|----------|
+| Speak | Chunk + synth + play queue |
+| Pause / Resume | mpv pause (when available) |
+| Stop | Clear queue, kill player |
+| Replay | Last successful chunk without re-synth |
+| Seek scrubber | Seek within current segment |
+| Volume | App-level mpv volume |
+
+Read-aloud hotkey uses the same streaming path.
 
 ## Config & data
 

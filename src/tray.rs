@@ -171,8 +171,9 @@ pub struct TrayHostReport {
 impl TrayHostReport {
     pub fn summary_line(&self) -> String {
         format!(
-            "display={} session={} ayatana_lib={} appindicator_ext={}",
+            "display={} ({}) session={} ayatana_lib={} appindicator_ext={}",
             if self.has_display { "yes" } else { "no" },
+            self.display.as_deref().unwrap_or("-"),
             self.session.as_deref().unwrap_or("?"),
             if self.ayatana_lib_present {
                 "ok"
