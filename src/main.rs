@@ -141,6 +141,8 @@ fn run_doctor() -> anyhow::Result<()> {
         .unwrap_or(0);
     println!("  voice refs: {n_voices} wav(s) in {}", voices.display());
 
+    doctor_mic_probe(&cfg);
+
     // Worker ping smoke (no model load)
     match crate::ipc::WorkerClient::spawn("stt", &cfg.paths.python_bin, &cfg.paths.python_root) {
         Ok(mut w) => match w.ping() {
@@ -160,4 +162,65 @@ fn run_doctor() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Report Pulse default source + short capture energy probe.
+fn doctor_mic_probe(cfg: &Config) {
+    println!("  mic config: {}", {
+        let s = cfg.audio.mic_source.trim();
+        if s.is_empty() {
+            "(system default)"
+        } else {
+            s
+        }
+    });
+
+    match crate::audio::default_pulse_source() {
+        Ok(Some(name)) => println!("  pulse default source: {name}"),
+        Ok(None) => println!("  pulse default source: (empty)"),
+        Err(e) => {
+            println!("  pulse default source: skip ({e:#})");
+            println!("  mic probe: skipped (no pulse default source)");
+            return;
+        }
+    }
+
+    match crate::audio::list_pulse_sources() {
+        Ok(list) => {
+            println!("  pulse sources: {} listed", list.len());
+            for s in list.iter().take(8) {
+                println!("    - {} [{}]", s.name, s.state);
+            }
+            if list.len() > 8 {
+                println!("    … {} more", list.len() - 8);
+            }
+        }
+        Err(e) => println!("  pulse sources: skip ({e:#})"),
+    }
+
+    let source = crate::audio::resolve_mic_source(&cfg.audio.mic_source);
+    let probe_path = crate::audio::temp_wav_path("doctor-probe");
+    match crate::audio::record_probe(&probe_path, source, 1.0) {
+        Ok(()) => match crate::audio::wav_file_energy(&probe_path) {
+            Ok(e) => {
+                let verdict = if e.is_non_silence() {
+                    "energy OK (non-silence)"
+                } else if e.frames == 0 {
+                    "silence / empty (0 frames)"
+                } else {
+                    "silence (low energy — check mic, mute, or wrong source)"
+                };
+                println!(
+                    "  mic probe: {verdict} (source={source}, peak={}, rms={:.1}, frames={}, file={})",
+                    e.peak,
+                    e.rms,
+                    e.frames,
+                    probe_path.display()
+                );
+            }
+            Err(e) => println!("  mic probe: fail (energy read: {e:#})"),
+        },
+        Err(e) => println!("  mic probe: skipped/fail ({e:#})"),
+    }
+    let _ = std::fs::remove_file(&probe_path);
 }

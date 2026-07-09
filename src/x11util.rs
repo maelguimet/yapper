@@ -97,6 +97,75 @@ pub fn display_available() -> bool {
     std::env::var("DISPLAY").map(|d| !d.is_empty()).unwrap_or(false)
 }
 
+/// True if Super (X11 Mod4) is currently held.
+///
+/// egui-winit drops Super on non-macOS (`mac_cmd` is always false; `command` is
+/// Ctrl). Hotkey Capture must call this so Super+Shift+S is not stored as Shift+S.
+///
+/// Returns `false` when DISPLAY is missing, libX11 cannot open, or the query fails
+/// (callers may warn rather than silently treating that as "user released Super").
+pub fn super_modifier_down() -> bool {
+    match query_super_modifier_down() {
+        Ok(v) => v,
+        Err(_) => false,
+    }
+}
+
+/// Result-bearing Super/Mod4 query for tests and diagnostics.
+pub fn query_super_modifier_down() -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        query_x11_mod4_down()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(false)
+    }
+}
+
+/// X11: Super is almost always Mod4 on GNOME/Pop/Ubuntu desktops.
+#[cfg(target_os = "linux")]
+fn query_x11_mod4_down() -> Result<bool> {
+    use std::os::raw::{c_int, c_uint};
+    use x11_dl::xlib::{self, Display, Mod4Mask, Window};
+
+    if !display_available() {
+        bail!("no DISPLAY for Super/Mod4 query");
+    }
+    let xlib = xlib::Xlib::open().context("load libX11 for Super/Mod4 query")?;
+    unsafe {
+        let dpy: *mut Display = (xlib.XOpenDisplay)(std::ptr::null());
+        if dpy.is_null() {
+            bail!("XOpenDisplay failed (Super/Mod4 query)");
+        }
+        let root: Window = (xlib.XDefaultRootWindow)(dpy);
+        let mut root_ret: Window = 0;
+        let mut child_ret: Window = 0;
+        let mut root_x: c_int = 0;
+        let mut root_y: c_int = 0;
+        let mut win_x: c_int = 0;
+        let mut win_y: c_int = 0;
+        let mut mask: c_uint = 0;
+        let ok = (xlib.XQueryPointer)(
+            dpy,
+            root,
+            &mut root_ret,
+            &mut child_ret,
+            &mut root_x,
+            &mut root_y,
+            &mut win_x,
+            &mut win_y,
+            &mut mask,
+        );
+        (xlib.XCloseDisplay)(dpy);
+        if ok == 0 {
+            bail!("XQueryPointer failed (Super/Mod4 query)");
+        }
+        let _ = (root_ret, child_ret, root_x, root_y, win_x, win_y);
+        Ok((mask & Mod4Mask as c_uint) != 0)
+    }
+}
+
 /// Hold-to-talk insert path: put transcript on clipboard and paste (no Enter).
 pub fn insert_transcript_at_cursor(text: &str, also_keep_clipboard: bool) -> Result<()> {
     paste_at_cursor(text)?;
@@ -398,6 +467,29 @@ mod tests {
     fn tools_detection_does_not_panic() {
         let _ = x11_tools_available();
         let _ = display_available();
+        let _ = super_modifier_down();
+    }
+
+    #[test]
+    fn super_modifier_query_when_display() {
+        // Read-only query; safe on live DISPLAY (does not steal focus/selection).
+        if !display_available() {
+            let _iso = match IsolatedX::start() {
+                Some(x) => x,
+                None => {
+                    eprintln!("skip super_modifier_query: no DISPLAY/Xvfb");
+                    return;
+                }
+            };
+            let down = query_super_modifier_down().expect("query Super on isolated X");
+            assert!(!down, "idle Xvfb should not report Super held");
+            return;
+        }
+        // Live or any session: API must succeed and return a bool (Super not held while test runs).
+        let down = query_super_modifier_down().expect("query Super/Mod4 via XQueryPointer");
+        // We cannot force Super up without injecting keys; only assert API works.
+        let _ = down;
+        let _ = super_modifier_down();
     }
 
     #[test]

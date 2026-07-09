@@ -4891,6 +4891,7 @@ dependencies = [
  "serde_json",
  "toml",
  "tray-icon",
+ "x11-dl",
 ]
 
 [[package]]

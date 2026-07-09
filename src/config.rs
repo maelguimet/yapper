@@ -13,6 +13,17 @@ pub struct Config {
     pub hotkeys: HotkeysConfig,
     pub models: ModelsConfig,
     pub paths: PathsConfig,
+    /// Mic / capture settings. Absent in older configs → default.
+    #[serde(default)]
+    pub audio: AudioConfig,
+}
+
+/// Input capture preferences.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct AudioConfig {
+    /// Pulse/PipeWire source name for ffmpeg `-i`. Empty = system default.
+    #[serde(default)]
+    pub mic_source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -88,6 +99,9 @@ impl Default for Config {
             paths: PathsConfig {
                 python_root: home.join("projects/yapper/python").to_string_lossy().into(),
                 python_bin: "python3".into(),
+            },
+            audio: AudioConfig {
+                mic_source: String::new(),
             },
         }
     }
@@ -177,5 +191,59 @@ mod tests {
         assert_eq!(loaded.tts.tone, "calm");
         assert_eq!(loaded.hotkeys.read_aloud, "Ctrl+Alt+S");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mic_source_round_trip() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("yapper-cfg-mic-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let mut cfg = Config::default();
+        cfg.audio.mic_source =
+            "alsa_input.usb-FuZhou_Kingwayinfo_CO._LTD_TONOR_TC30_Audio_Device_20200707-00.mono-fallback"
+                .into();
+        cfg.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.audio.mic_source, cfg.audio.mic_source);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_audio_section_defaults() {
+        // Older configs without [audio] must still load.
+        let raw = r#"
+[stt]
+model = "small"
+language = "auto"
+copy_transcript = true
+
+[tts]
+model = "chatterbox-multilingual"
+language = "auto"
+tone = "neutral"
+voice = "eve"
+
+[read_aloud]
+source = "selection"
+
+[hotkeys]
+read_aloud = "Super+Shift+S"
+push_to_talk = "Super+Shift+R"
+
+[models]
+dir = "/tmp/models"
+voices_dir = "/tmp/voices"
+
+[paths]
+python_root = "/tmp/python"
+python_bin = "python3"
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.audio.mic_source, "");
+        assert_eq!(cfg.stt.model, "small");
     }
 }

@@ -22,6 +22,7 @@ Local tray app for **STT + TTS** on Linux (no cloud APIs). Hybrid: **Rust** shel
 | 9 | v1 targets: **Pop/Ubuntu-class GNOME, X11, AppIndicator, NVIDIA CUDA**. Wayland later. |
 | 10 | Project path: **`~/projects/yapper`**. |
 | 11 | v1 = tray + GUI + hotkeys + installer + README. No director, no Wayland. |
+| 12 | **Always-on tray.** Window close/minimize **hides to top-bar tray**; process + hotkeys stay alive. **Quit only** via tray right-click → Quit (or explicit Exit). No tray icon = broken. |
 
 ---
 

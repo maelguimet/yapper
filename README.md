@@ -30,6 +30,7 @@ Whisper (STT) + Chatterbox multilingual (TTS). No cloud STT/TTS APIs.
 | **Rust** toolchain (`rustc`, `cargo`) | Build the app |
 | **Python 3.10+** | STT/TTS workers |
 | **ffmpeg** | Audio decode/encode helpers |
+| **arecord** (`alsa-utils`) | Mic capture (Pulse/PipeWire via ALSA plugin) |
 | **xclip**, **xdotool** | Clipboard/selection and paste-at-cursor |
 | **PulseAudio or PipeWire** (Pulse compat) | Mic + playback |
 | Disk: **~5–15 GB** free for models + venv | Whisper medium + Chatterbox weights |
@@ -42,7 +43,7 @@ sudo apt install -y \
   build-essential pkg-config \
   libgtk-3-dev libayatana-appindicator3-dev \
   libx11-dev libxi-dev libxtst-dev \
-  ffmpeg xclip xdotool \
+  ffmpeg alsa-utils xclip xdotool \
   python3 python3-venv python3-dev \
   portaudio19-dev
 # NVIDIA driver already working: nvidia-smi
@@ -117,11 +118,32 @@ Rebind in the GUI (persists to config). Grab failures show a yellow warning in t
 
 | Path | Purpose |
 |------|---------|
-| `~/.config/yapper/config.toml` | Settings, hotkeys |
+| `~/.config/yapper/config.toml` | Settings, hotkeys, mic source |
 | `~/.local/share/yapper/models/` | Whisper weights |
 | `~/.local/share/yapper/voices/` | Eve tone references |
 | `~/.local/share/yapper/venv/` | Installer Python env |
 | `~/.local/share/yapper/logs/` | Logs |
+
+### Microphone (Pulse / PipeWire)
+
+Capture uses **arecord** via the Pulse ALSA device (`-D pulse` or `-D pulse:<source>`). Continuous ffmpeg pulse capture writes empty files when stopped without `-t` on PipeWire hosts, so it is not used for hold-to-talk. Empty `audio.mic_source` in config means the **system default** source.
+
+```toml
+[audio]
+# Empty = Pulse default. Or a full source name from `pactl list sources short`:
+# mic_source = "alsa_input.usb-…_TONOR_TC30_….mono-fallback"
+mic_source = ""
+```
+
+Tips:
+
+- List sources: `pactl list sources short`
+- Default source: `pactl get-default-source` / set with `pactl set-default-source <name>`
+- Prefer a real **input** (mic) over `*.monitor` sinks (those capture playback)
+- On this class of host, USB mics like **TONOR TC30** should appear as `alsa_input.usb-…TONOR…`
+- GUI: microphone dropdown + **Refresh**, live level while recording, device name in status
+- `yapper doctor` prints the default source and runs a ~1s energy probe (non-silence / silence / skip reason)
+- Flatpak sandboxes often block Pulse device access — run the native binary for mic capture
 
 ## Layout
 

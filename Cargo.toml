@@ -23,3 +23,5 @@ rfd = "0.15"
 global-hotkey = "0.6"
 tray-icon = { version = "0.24.1", features = ["libxdo"] }
 gtk = "0.18"
+# Super/Mod4 query during hotkey capture (egui drops Super on Linux).
+x11-dl = "2.21"
