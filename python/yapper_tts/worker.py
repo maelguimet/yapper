@@ -141,7 +141,9 @@ class TtsWorker:
         if self.state.model is None:
             raise TtsError("not_loaded", "no TTS model loaded; call load first")
 
-        text = str(req.params.get("text", "")).strip()
+        from yapper_tts.sanitize import sanitize_for_tts
+
+        text = sanitize_for_tts(str(req.params.get("text", "")))
         if not text:
             raise TtsError("bad_args", "params.text is required and must be non-empty")
 

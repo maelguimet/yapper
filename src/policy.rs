@@ -67,8 +67,12 @@ impl DualModelPolicy {
         }
     }
 
+    /// Sticky warm default: never unload merely because a job finished.
+    pub fn should_unload_after_job(&self) -> bool {
+        crate::textprep::should_unload_after_successful_job()
+    }
+
     /// If both loaded and we need to free one for space: unload least recently used.
-    #[allow(dead_code)] // used by tests and future proactive unload UI
     pub fn lru_to_unload(&self) -> Option<Role> {
         match (self.stt.loaded, self.tts.loaded) {
             (true, true) => match (self.stt.last_used, self.tts.last_used) {
@@ -153,5 +157,17 @@ mod tests {
         p.mark_unloaded(Role::Stt);
         assert!(!p.stt.loaded);
         assert!(p.stt.model_id.is_none());
+    }
+
+    #[test]
+    fn sticky_after_job_never_unloads() {
+        let mut p = DualModelPolicy::default();
+        p.mark_loaded(Role::Stt, "small");
+        p.mark_loaded(Role::Tts, "chatterbox-multilingual");
+        p.touch(Role::Stt);
+        p.touch(Role::Tts);
+        assert!(!p.should_unload_after_job());
+        assert!(p.stt.loaded);
+        assert!(p.tts.loaded);
     }
 }

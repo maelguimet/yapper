@@ -77,11 +77,13 @@ impl TrayHandle {
         menu.append(&quit)?;
 
         let icon = load_tray_icon();
+        // No with_title: on AppIndicator/GNOME, title becomes a panel text label
+        // ("Yapper") next to the glyph. Ship the mic icon only; tooltip still works
+        // where the host supports it.
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("Yapper — STT + TTS (right-click for menu)")
             .with_icon(icon)
-            .with_title("Yapper")
             .build()
             .context("build tray icon (StatusNotifier/AppIndicator)")?;
 
@@ -124,6 +126,36 @@ impl TrayHandle {
 
     pub fn try_recv(&self) -> Option<TrayAction> {
         self.rx.try_recv().ok()
+    }
+}
+
+/// Pump GTK events so StatusNotifier/AppIndicator stays alive under eframe/winit.
+///
+/// tray-icon on Linux requires a GTK event loop on the thread that created the
+/// icon. eframe uses winit, so without this pump the icon is often never
+/// registered with the SNI host (the thrice-failed B20 root cause).
+///
+/// Safe to call before `gtk::init`: no-ops until GTK is initialized (tray create).
+pub fn pump_gtk_events() {
+    #[cfg(target_os = "linux")]
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static GTK_READY: AtomicBool = AtomicBool::new(false);
+
+        if !GTK_READY.load(Ordering::Relaxed) {
+            // gtk::is_initialized() is the safe probe (0.18).
+            if !gtk::is_initialized() {
+                return;
+            }
+            GTK_READY.store(true, Ordering::Relaxed);
+        }
+        // Drain pending events without blocking the egui frame.
+        for _ in 0..32 {
+            if !gtk::events_pending() {
+                break;
+            }
+            let _ = gtk::main_iteration_do(false);
+        }
     }
 }
 
@@ -281,39 +313,44 @@ fn procedural_icon() -> Icon {
 }
 
 /// Pure RGBA builder for the default tray glyph (tested without tray-icon display).
+///
+/// Filled rounded disc + simple mic silhouette so the icon remains readable at
+/// 16–22 px panel sizes (thin line art disappears on GNOME top bar).
 pub fn build_mic_icon_rgba(size: u32) -> Vec<u8> {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     let s = size as i32;
     let cx = s / 2;
-    let cy = s / 2 - 2;
-    // Mic capsule
+    let cy = s / 2;
+    let r_outer = (s * 15) / 32; // filled disc
+    let r2 = r_outer * r_outer;
     for y in 0..s {
         for x in 0..s {
             let i = ((y * s + x) * 4) as usize;
             let dx = x - cx;
             let dy = y - cy;
-            // Capsule body
-            let in_capsule = dx.abs() <= s / 6
-                && dy >= -s / 4
-                && dy <= s / 6
-                || (dx * dx + (dy + s / 4) * (dy + s / 4) <= (s / 6) * (s / 6));
-            // Stand
-            let in_stand = dx.abs() <= 1 && dy > s / 6 && dy < s / 3;
-            let in_base = dy >= s / 3 - 1 && dy <= s / 3 + 1 && dx.abs() <= s / 5;
-            // Arc under capsule
-            let arc_r = s / 4;
-            let in_arc = {
-                let adx = dx;
-                let ady = dy - s / 10;
-                let r2 = adx * adx + ady * ady;
-                r2 <= arc_r * arc_r
-                    && r2 >= (arc_r - 2) * (arc_r - 2)
-                    && ady >= 0
-            };
-            if in_capsule || in_stand || in_base || in_arc {
-                // Light blue, fully opaque (readable on light and dark panels)
-                rgba[i] = 90;
-                rgba[i + 1] = 170;
+            let dist2 = dx * dx + dy * dy;
+            if dist2 > r2 {
+                continue;
+            }
+            // Soft edge: full blue disc
+            rgba[i] = 70;
+            rgba[i + 1] = 150;
+            rgba[i + 2] = 255;
+            rgba[i + 3] = 255;
+            // Mic body (darker blue / white-ish capsule for contrast)
+            let mic_cx = 0;
+            let mic_cy = -s / 16;
+            let mdx = dx - mic_cx;
+            let mdy = dy - mic_cy;
+            let in_capsule = mdx.abs() <= s / 10
+                && mdy >= -s / 7
+                && mdy <= s / 10
+                || (mdx * mdx + (mdy + s / 7) * (mdy + s / 7) <= (s / 10) * (s / 10));
+            let in_stand = mdx.abs() <= 1 && mdy > s / 10 && mdy < s / 5;
+            let in_base = mdy >= s / 5 - 1 && mdy <= s / 5 + 1 && mdx.abs() <= s / 7;
+            if in_capsule || in_stand || in_base {
+                rgba[i] = 245;
+                rgba[i + 1] = 248;
                 rgba[i + 2] = 255;
                 rgba[i + 3] = 255;
             }

@@ -6,10 +6,14 @@ mod config;
 mod hotkeys;
 mod ipc;
 mod lifecycle;
+mod mic;
+mod mpv_backend;
 mod policy;
 mod segment;
+mod textprep;
 mod transport;
 mod tray;
+mod ui;
 mod workers;
 mod x11util;
 
@@ -120,6 +124,16 @@ fn run_doctor() -> anyhow::Result<()> {
     println!(
         "  always-on: close/minimize hide to tray; Quit only from tray menu (or confirmed Exit)"
     );
+    for (name, sample) in crate::textprep::regression_fixtures() {
+        let cleaned = crate::textprep::sanitize_for_tts(sample);
+        println!(
+            "  tts fixture {name}: raw_chars={} sanitized_chars={}",
+            sample.chars().count(),
+            cleaned.chars().count()
+        );
+    }
+    let mut no_player: Option<std::process::Child> = None;
+    let _ = crate::audio::stop_playback_if_running(&mut no_player);
 
     let stt_mod = std::path::Path::new(&cfg.paths.python_root).join("yapper_stt");
     let tts_mod = std::path::Path::new(&cfg.paths.python_root).join("yapper_tts");

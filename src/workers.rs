@@ -99,12 +99,18 @@ impl WorkerManager {
         match self.try_load(role, model, device) {
             Ok(()) => Ok(()),
             Err(e) if is_oom_error(&e) => {
-                if let Some(peer) = self.policy.peer_to_unload_on_pressure(role) {
-                    self.unload(peer)?;
-                    self.try_load(role, model, device)
-                } else {
-                    Err(e)
+                // Prefer explicit peer of the role being loaded; fall back to LRU.
+                let victim = self
+                    .policy
+                    .peer_to_unload_on_pressure(role)
+                    .or_else(|| self.policy.lru_to_unload());
+                if let Some(peer) = victim {
+                    if peer != role {
+                        self.unload(peer)?;
+                        return self.try_load(role, model, device);
+                    }
                 }
+                Err(e)
             }
             Err(e) => Err(e),
         }
@@ -155,6 +161,8 @@ impl WorkerManager {
                     .unwrap_or("transcribe failed")
             );
         }
+        // Sticky warm (B24): success never unloads.
+        debug_assert!(!self.policy.should_unload_after_job());
         Ok(resp
             .result
             .get("text")
@@ -212,6 +220,8 @@ impl WorkerManager {
                     .unwrap_or("synthesize failed")
             );
         }
+        // Sticky warm (B24): success never unloads.
+        debug_assert!(!self.policy.should_unload_after_job());
         Ok(out_path.to_path_buf())
     }
 
