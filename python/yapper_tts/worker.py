@@ -18,6 +18,20 @@ TTS_VERSION = "0.1.0"
 TTS_MODEL_ID = "chatterbox-multilingual"
 ALLOWED_LANGUAGES = frozenset({"en", "fr"})
 
+# Trailing silence after model audio — reduces abrupt cutoffs on chunked playback.
+TRAILING_PAD_MS = 150
+_NEAR_SILENT_PEAK = 1e-4
+# Absolute floor for empty/near-empty clips (independent of text length).
+_MIN_ABS_DURATION_S = 0.12
+# Extreme-but-plausible speech rates for lower bounds only.
+# Real speech is slower (~12–15 chars/s, ~2.5 words/s); we only catch obvious truncation.
+_MAX_PLAUSIBLE_CHARS_PER_S = 48.0
+_MAX_PLAUSIBLE_WORDS_PER_S = 6.5
+# Slow-speech ceiling (chars/s) with slack so long quiet pauses still pass.
+_MIN_PLAUSIBLE_CHARS_PER_S = 2.0
+_MAX_DURATION_SLACK = 1.5
+_MIN_MAX_DURATION_S = 4.0
+
 
 @dataclass
 class TtsState:
@@ -196,17 +210,9 @@ class TtsWorker:
             raise
 
         sr = self.state.sample_rate or int(getattr(self.state.model, "sr", 24000) or 24000)
-        gen_ms = (time.perf_counter() - t0) * 1000.0
         duration = _audio_duration_secs(wav, sr)
-        log.info(
-            "synth done chars=%d duration=%.3fs gen_ms=%.0f path=%s",
-            len(text),
-            duration,
-            gen_ms,
-            out_path,
-        )
 
-        # Output sanity: empty / near-silent / absurd duration → retry once with safer knobs.
+        # Empty / near-silent / absurd duration → retry once with safer knobs, then fail.
         if not _output_sane(text, duration, wav):
             log.warning(
                 "output sanity failed (duration=%.3fs chars=%d); retry with safer knobs",
@@ -233,7 +239,16 @@ class TtsWorker:
                     f"TTS output failed sanity (duration={duration:.3f}s for {len(text)} chars)",
                 )
 
-        _write_wav(out_path, wav, sr)
+        # Wall time covers accepted attempt (and retry when used), not only the first generate.
+        gen_ms = (time.perf_counter() - t0) * 1000.0
+        duration = _write_wav(out_path, wav, sr)
+        log.info(
+            "synth done chars=%d duration=%.3fs gen_ms=%.0f path=%s",
+            len(text),
+            duration,
+            gen_ms,
+            out_path,
+        )
         return Response.success(
             req.id,
             {
@@ -289,47 +304,81 @@ def _to_float_array(wav: Any) -> Any:
 
 
 def _audio_duration_secs(wav: Any, sample_rate: int) -> float:
-    import numpy as np
-
     arr = _to_float_array(wav)
     if arr.size == 0 or sample_rate <= 0:
         return 0.0
     return float(arr.size) / float(sample_rate)
 
 
+def min_sane_duration_secs(text: str) -> float:
+    """Lower duration bound from words and characters (obvious truncation only)."""
+    stripped = text.strip()
+    chars = max(len(stripped), 1)
+    words = max(len(stripped.split()), 1)
+    from_chars = chars / _MAX_PLAUSIBLE_CHARS_PER_S
+    from_words = words / _MAX_PLAUSIBLE_WORDS_PER_S
+    return max(_MIN_ABS_DURATION_S, from_chars, from_words)
+
+
+def max_sane_duration_secs(text: str) -> float:
+    """Upper duration bound — very slow speech with slack, not a tight lip-sync."""
+    stripped = text.strip()
+    chars = max(len(stripped), 1)
+    from_chars = (chars / _MIN_PLAUSIBLE_CHARS_PER_S) * _MAX_DURATION_SLACK
+    return max(_MIN_MAX_DURATION_S, from_chars)
+
+
+def trailing_pad_samples(sample_rate: int) -> int:
+    """Number of zero samples appended by `_write_wav` for non-silent audio."""
+    if sample_rate <= 0:
+        return 0
+    return int(sample_rate * TRAILING_PAD_MS / 1000.0)
+
+
 def _output_sane(text: str, duration_secs: float, wav: Any) -> bool:
     """Reject empty, near-silent, or absurdly short/long audio relative to text."""
     import numpy as np
 
-    chars = max(len(text.strip()), 1)
-    if duration_secs <= 0.05:
+    if duration_secs < _MIN_ABS_DURATION_S:
         return False
-    # ~12 chars/sec spoken upper bound → min duration; allow slack.
-    min_dur = max(0.15, chars / 30.0 * 0.25)
-    max_dur = max(3.0, chars / 8.0 * 4.0)  # very slow speech ceiling
-    if duration_secs < min_dur or duration_secs > max_dur:
+    if duration_secs < min_sane_duration_secs(text):
+        return False
+    if duration_secs > max_sane_duration_secs(text):
         return False
     arr = _to_float_array(wav)
     if arr.size == 0:
         return False
     peak = float(np.max(np.abs(arr)))
-    if peak < 1e-4:
-        return False  # near-silent
+    if peak < _NEAR_SILENT_PEAK:
+        return False
     return True
 
 
-def _write_wav(path: Path, wav: Any, sample_rate: int) -> None:
-    """Write tensor/ndarray audio to 16-bit PCM WAV (NaN-safe)."""
+def _write_wav(path: Path, wav: Any, sample_rate: int) -> float:
+    """Write 16-bit PCM WAV (NaN-safe) with a small trailing silence pad.
+
+    Returns the duration in seconds of the written file (including pad when applied).
+    Pad is skipped when the buffer is already near-silent.
+    """
     import numpy as np
 
     arr = _to_float_array(wav)
-    arr = np.clip(arr, -1.0, 1.0)
+    arr = np.clip(arr, -1.0, 1.0).astype(np.float32, copy=False)
+    if arr.size > 0 and sample_rate > 0:
+        peak = float(np.max(np.abs(arr)))
+        if peak >= _NEAR_SILENT_PEAK:
+            n_pad = trailing_pad_samples(sample_rate)
+            if n_pad > 0:
+                arr = np.concatenate([arr, np.zeros(n_pad, dtype=np.float32)])
     pcm = (arr * 32767.0).astype(np.int16)
     with wave.open(str(path), "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(sample_rate)
         wf.writeframes(pcm.tobytes())
+    if arr.size == 0 or sample_rate <= 0:
+        return 0.0
+    return float(arr.size) / float(sample_rate)
 
 
 def _approx_vram_mb() -> int | None:
