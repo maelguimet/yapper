@@ -3,6 +3,7 @@
 mod app;
 mod audio;
 mod config;
+mod hotkey_apply;
 mod hotkeys;
 mod ipc;
 mod lifecycle;

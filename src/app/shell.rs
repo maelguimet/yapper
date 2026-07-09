@@ -2,9 +2,10 @@
 
 use super::{egui_key_to_token, CaptureOutcome, HotkeyCaptureField, YapperApp};
 use crate::audio::stop_recording;
-use crate::hotkeys::{
-    canonicalize_hotkey_spec, capture_mod_state, format_capture_hotkey, reregister, HotkeyAction,
+use crate::hotkey_apply::{
+    decide_after_grab, live_specs_after_outcome, validate_draft_hotkeys, HotkeyApplyOutcome,
 };
+use crate::hotkeys::{capture_mod_state, format_capture_hotkey, reregister, HotkeyAction};
 use crate::lifecycle::{
     close_request_intent, minimize_request_intent, should_cancel_close, should_unload_on_exit,
     tray_menu_intent, ShellIntent,
@@ -15,57 +16,92 @@ use eframe::egui;
 use std::time::{Duration, Instant};
 
 impl YapperApp {
+    /// Validate drafts → register grabs → only then commit live config + disk.
+    /// Apply is the sole user path that reregisters live X11 grabs.
     pub(crate) fn apply_hotkeys(&mut self) {
-        let read_canon = match canonicalize_hotkey_spec(&self.cfg.hotkeys.read_aloud) {
-            Ok(s) => s,
-            Err(e) => {
-                self.hotkey_error = Some(format!("read-aloud invalid: {e:#}"));
-                self.status = "hotkey update failed".into();
+        let previous_live = self.cfg.hotkeys.clone();
+        let planned = match validate_draft_hotkeys(
+            &self.hotkey_draft_read_aloud,
+            &self.hotkey_draft_push_to_talk,
+        ) {
+            Ok(p) => p,
+            Err(outcome) => {
+                self.apply_hotkey_outcome_ui(&outcome);
                 return;
             }
         };
-        let ptt_canon = match canonicalize_hotkey_spec(&self.cfg.hotkeys.push_to_talk) {
-            Ok(s) => s,
-            Err(e) => {
-                self.hotkey_error = Some(format!("push-to-talk invalid: {e:#}"));
-                self.status = "hotkey update failed".into();
-                return;
-            }
-        };
-        self.cfg.hotkeys.read_aloud = read_canon;
-        self.cfg.hotkeys.push_to_talk = ptt_canon;
-        self.persist();
+
         // Drop previous grabs *before* registering — double-register is the B13 bug.
-        let previous = self.hotkeys.take();
+        let previous_hub = self.hotkeys.take();
         match reregister(
-            previous,
-            &self.cfg.hotkeys.read_aloud,
-            &self.cfg.hotkeys.push_to_talk,
+            previous_hub,
+            &planned.read_aloud,
+            &planned.push_to_talk,
         ) {
             Ok(h) => {
                 let specs = h.registered_specs().unwrap_or_default();
+                let outcome = decide_after_grab(planned, previous_live, Ok(()));
+                debug_assert!(outcome.commits_live());
                 self.hotkeys = Some(h);
-                self.hotkey_error = None;
-                self.hotkey_capture = None;
-                self.status = if specs.is_empty() {
-                    format!(
-                        "hotkeys live: {} | {}",
-                        self.cfg.hotkeys.read_aloud, self.cfg.hotkeys.push_to_talk
-                    )
-                } else {
-                    format!("hotkeys live: {}", specs.join(" | "))
-                };
+                self.commit_applied_hotkeys(&outcome, &specs);
             }
             Err(e) => {
-                // Leave hub empty so we never claim grabs we do not hold.
-                self.hotkeys = None;
-                self.hotkey_error = Some(format!(
-                    "hotkey grab failed (DE conflict or bad combo): {e:#}. \
-                     Rebind or free the shortcut in system settings, then Apply again."
-                ));
-                self.status = "hotkey update failed — shortcuts inactive until fixed".into();
+                let outcome = decide_after_grab(
+                    planned,
+                    previous_live.clone(),
+                    Err(format!("{e:#}")),
+                );
+                // Prefer restoring previous working grabs; else leave inactive + error.
+                match reregister(
+                    None,
+                    &previous_live.read_aloud,
+                    &previous_live.push_to_talk,
+                ) {
+                    Ok(restored) => {
+                        self.hotkeys = Some(restored);
+                        self.cfg.hotkeys =
+                            live_specs_after_outcome(&previous_live, &outcome);
+                        self.hotkey_error = outcome.error_message().map(str::to_string);
+                        self.status =
+                            "hotkey update failed — previous shortcuts still active".into();
+                    }
+                    Err(restore_err) => {
+                        self.hotkeys = None;
+                        self.cfg.hotkeys =
+                            live_specs_after_outcome(&previous_live, &outcome);
+                        let base = outcome.error_message().unwrap_or("hotkey grab failed");
+                        self.hotkey_error = Some(format!(
+                            "{base} (also could not restore previous: {restore_err:#})"
+                        ));
+                        self.status = outcome.status_line().to_string();
+                    }
+                }
+                // Never persist drafts on grab failure — live specs unchanged.
             }
         }
+    }
+
+    fn apply_hotkey_outcome_ui(&mut self, outcome: &HotkeyApplyOutcome) {
+        self.hotkey_error = outcome.error_message().map(str::to_string);
+        self.status = outcome.status_line().to_string();
+    }
+
+    fn commit_applied_hotkeys(&mut self, outcome: &HotkeyApplyOutcome, registered_specs: &[String]) {
+        let HotkeyApplyOutcome::Applied { live, status } = outcome else {
+            self.apply_hotkey_outcome_ui(outcome);
+            return;
+        };
+        self.cfg.hotkeys = live.clone();
+        self.hotkey_draft_read_aloud = live.read_aloud.clone();
+        self.hotkey_draft_push_to_talk = live.push_to_talk.clone();
+        self.persist();
+        self.hotkey_error = None;
+        self.hotkey_capture = None;
+        self.status = if registered_specs.is_empty() {
+            status.clone()
+        } else {
+            format!("hotkeys live: {}", registered_specs.join(" | "))
+        };
     }
 
     pub(crate) fn hide_to_tray(&mut self, ctx: &egui::Context) {
@@ -177,8 +213,12 @@ impl YapperApp {
             }
             Some(CaptureOutcome::Bound(spec)) => {
                 match field {
-                    HotkeyCaptureField::ReadAloud => self.cfg.hotkeys.read_aloud = spec.clone(),
-                    HotkeyCaptureField::PushToTalk => self.cfg.hotkeys.push_to_talk = spec.clone(),
+                    HotkeyCaptureField::ReadAloud => {
+                        self.hotkey_draft_read_aloud = spec.clone();
+                    }
+                    HotkeyCaptureField::PushToTalk => {
+                        self.hotkey_draft_push_to_talk = spec.clone();
+                    }
                 }
                 self.hotkey_capture = None;
                 self.hotkey_error = None;

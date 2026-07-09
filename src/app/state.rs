@@ -126,6 +126,10 @@ pub struct YapperApp {
     pub(crate) hotkeys: Option<HotkeyHub>,
     pub(crate) hotkey_error: Option<String>,
     pub(crate) hotkey_capture: Option<HotkeyCaptureField>,
+    /// Settings editor draft for read-aloud (not live until successful Apply).
+    pub(crate) hotkey_draft_read_aloud: String,
+    /// Settings editor draft for hold-to-dictate (not live until successful Apply).
+    pub(crate) hotkey_draft_push_to_talk: String,
     pub(crate) tray: Option<TrayHandle>,
     pub(crate) tray_error: Option<String>,
     pub(crate) tray_tried: bool,
@@ -199,6 +203,9 @@ impl YapperApp {
             stt_model: stt_model.clone(),
         };
 
+        let hotkey_draft_read_aloud = cfg.hotkeys.read_aloud.clone();
+        let hotkey_draft_push_to_talk = cfg.hotkeys.push_to_talk.clone();
+
         let mut app = Self {
             cfg,
             jobs,
@@ -228,6 +235,8 @@ impl YapperApp {
             hotkeys,
             hotkey_error,
             hotkey_capture: None,
+            hotkey_draft_read_aloud,
+            hotkey_draft_push_to_talk,
             tray: None,
             tray_error: None,
             tray_tried: false,
@@ -364,6 +373,13 @@ impl YapperApp {
             "selection".into()
         };
         self.cfg.audio.mic_source = self.mic_source.clone();
+        // Hotkeys: only live applied specs. Drafts never merge here — Apply is
+        // the sole path that commits drafts into cfg.hotkeys after a successful grab.
+        self.cfg.hotkeys = crate::hotkey_apply::hotkeys_persist_payload(
+            &self.cfg.hotkeys,
+            &self.hotkey_draft_read_aloud,
+            &self.hotkey_draft_push_to_talk,
+        );
         match self.cfg.save_default_location() {
             Ok(()) => {
                 self.last_saved_prefs = self.current_prefs();

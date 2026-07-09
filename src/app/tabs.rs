@@ -17,9 +17,10 @@ impl YapperApp {
             if capturing {
                 ui.colored_label(egui::Color32::LIGHT_BLUE, "Press combo… (Esc cancel)");
             } else {
+                // Draft only — live cfg.hotkeys changes solely on successful Apply.
                 let value = match field {
-                    HotkeyCaptureField::ReadAloud => &mut self.cfg.hotkeys.read_aloud,
-                    HotkeyCaptureField::PushToTalk => &mut self.cfg.hotkeys.push_to_talk,
+                    HotkeyCaptureField::ReadAloud => &mut self.hotkey_draft_read_aloud,
+                    HotkeyCaptureField::PushToTalk => &mut self.hotkey_draft_push_to_talk,
                 };
                 ui.add(
                     egui::TextEdit::singleline(value)
@@ -303,13 +304,16 @@ impl YapperApp {
 
         card(ui, "Hotkeys", |ui| {
             ui.label(format!(
-                "{}  ·  {}",
+                "Live: {}  ·  {}",
                 self.cfg.hotkeys.read_aloud, self.cfg.hotkeys.push_to_talk
             ));
             ui.add_space(4.0);
             self.ui_hotkey_row(ui, "Read selection aloud", HotkeyCaptureField::ReadAloud);
             self.ui_hotkey_row(ui, "Hold to dictate", HotkeyCaptureField::PushToTalk);
-            helper_text(ui, "Press Capture, then Apply. Hotkeys go live only after Apply.");
+            helper_text(
+                ui,
+                "Edit or Capture a draft, then Apply. Save settings keeps live hotkeys only.",
+            );
             ui.add_space(4.0);
             if primary_button(ui, "Apply hotkeys").clicked() {
                 self.apply_hotkeys();
