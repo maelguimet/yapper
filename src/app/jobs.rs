@@ -211,6 +211,7 @@ fn handle_cmd(
                             role: Role::Stt,
                             op: "transcribe".into(),
                             error: err.clone(),
+                            job_id: None,
                         });
                     }
                     push_status(workers, msg_tx);
@@ -254,11 +255,13 @@ fn handle_cmd(
                 Err(e) => {
                     let err = format!("{e:#}");
                     // synthesize_timeout kills TTS on *any* request Err (timeout,
-                    // broken pipe, cancelled, crash). Always push ModelStatus.
+                    // broken pipe, cancelled, crash). job_id lets the UI ignore
+                    // expected Stop/Restart kills; ModelStatus still refreshes badges.
                     let _ = msg_tx.send(AppMsg::WorkerTimedOut {
                         role: Role::Tts,
                         op: "synthesize".into(),
                         error: err.clone(),
+                        job_id: Some(job_id),
                     });
                     push_status(workers, msg_tx);
                     let _ = msg_tx.send(AppMsg::TtsChunkFailed {

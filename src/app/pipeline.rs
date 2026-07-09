@@ -1,6 +1,9 @@
 //! YapperApp pipeline: async load/speak/transcribe via JobHub; transport pump.
 
-use super::messages::{is_live_tts_job, AppMsg, JobCmd};
+use super::messages::{
+    apply_tts_synth_timeout, is_live_tts_job, should_reload_tts_after_live_synth_failure,
+    AppMsg, JobCmd, SynthTimeoutDisposition, TtsTimeoutUiState,
+};
 use super::state::{
     follow_up_after_transcribe, recording_status_line, status_after_transcribe_success,
     RecordingIntent, TranscribeFollowUp,
@@ -359,27 +362,55 @@ impl YapperApp {
                     self.status = format!("segment {} skipped: {error}", index + 1);
                 }
                 // If worker was killed on timeout, tts_loaded may be false — reload.
-                if !self.tts_loaded && self.tts.active_job.is_some() {
+                if should_reload_tts_after_live_synth_failure(
+                    self.tts_loaded,
+                    self.tts.active_job,
+                ) {
                     self.load_tts();
                 } else {
                     self.pump_tts_synth();
                 }
                 self.try_play_next_ready();
             }
-            AppMsg::WorkerTimedOut { role, op, error } => {
+            AppMsg::WorkerTimedOut {
+                role,
+                op,
+                error,
+                job_id,
+            } => {
                 match role {
                     Role::Stt => {
                         self.stt_loaded = false;
                         self.stt_model_id = None;
                         self.stt_loading = false;
+                        self.status = format!("{role:?} {op}: {error}");
                     }
                     Role::Tts => {
-                        self.tts_loaded = false;
-                        self.tts_model_id = None;
-                        self.tts_loading = false;
+                        // Job-scoped filter: Stop/Restart kills must not overwrite
+                        // "playback stopped" / "restarting voice…" status.
+                        let mut ui = TtsTimeoutUiState {
+                            status: self.status.clone(),
+                            tts_loaded: self.tts_loaded,
+                            tts_model_id: self.tts_model_id.clone(),
+                            tts_loading: self.tts_loading,
+                        };
+                        let d = apply_tts_synth_timeout(
+                            &mut ui,
+                            self.tts.active_job,
+                            job_id,
+                            &op,
+                            &error,
+                        );
+                        if d == SynthTimeoutDisposition::ReportAndClearBadge {
+                            self.status = ui.status;
+                            self.tts_loaded = ui.tts_loaded;
+                            self.tts_model_id = ui.tts_model_id;
+                            self.tts_loading = ui.tts_loading;
+                        }
+                        // SilentCleanup: leave status + loading flags alone;
+                        // ModelStatus / CancelTtsWorker already reflect worker death.
                     }
                 }
-                self.status = format!("{role:?} {op}: {error}");
             }
             AppMsg::TonesListed { tones } => {
                 if !tones.is_empty() {
