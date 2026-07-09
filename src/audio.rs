@@ -230,18 +230,6 @@ pub fn kill_child_process(child: &mut Child) {
     let _ = child.wait();
 }
 
-pub fn stop_playback(child: &mut Option<Child>) {
-    if let Some(mut c) = child.take() {
-        kill_child_process(&mut c);
-    }
-}
-
-pub fn stop_playback_if_running(child: &mut Option<Child>) -> bool {
-    let was = child.is_some();
-    stop_playback(child);
-    was
-}
-
 fn which(bin: &str) -> bool {
     Command::new("which")
         .arg(bin)

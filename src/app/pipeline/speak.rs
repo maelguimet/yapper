@@ -3,7 +3,7 @@
 use super::super::messages::JobCmd;
 use super::super::YapperApp;
 use crate::audio::temp_wav_path;
-use crate::segment::{estimate_segment_count, split_for_tts};
+use crate::segment::split_for_tts;
 use crate::textprep::sanitize_for_tts;
 use crate::ui::{
     chunk_paths_retained_for_replay, chunk_paths_to_remove, resolve_replay_path,
@@ -124,8 +124,6 @@ impl YapperApp {
             self.status = "nothing to speak".into();
             return;
         }
-        let est = estimate_segment_count(&text);
-        let _ = est;
         let job_id = self.tts.begin_job(segments);
         self.transport
             .set_pending_queue(self.tts.pending.len() > 1);

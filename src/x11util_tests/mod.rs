@@ -7,8 +7,3 @@ mod support;
 mod cases_plan;
 mod cases_selection;
 mod cases_insert;
-
-// Private re-export so case modules can `use super::{IsolatedX, ...}`.
-// (Child modules may access private parent names; pub(super) would not.)
-#[allow(unused_imports)]
-use support::*;

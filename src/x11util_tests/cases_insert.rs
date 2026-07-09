@@ -1,7 +1,7 @@
 //! Paste / insert-at-cursor and clipboard keep/restore (Xvfb + sink).
 
 use super::super::*;
-use super::{assert_injected_via_sink, scratch_dir, x11_lock, IsolatedX};
+use super::support::{assert_injected_via_sink, scratch_dir, x11_lock, IsolatedX};
 use std::fs;
 
 #[test]

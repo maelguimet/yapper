@@ -1,7 +1,7 @@
 //! CLIPBOARD / PRIMARY round-trips and Super modifier query (Xvfb when needed).
 
 use super::super::*;
-use super::{x11_lock, IsolatedX};
+use super::support::{scratch_dir, x11_lock, IsolatedX};
 
 #[test]
 fn super_modifier_query_when_display() {
@@ -73,7 +73,7 @@ fn primary_is_readable_for_read_aloud_source() {
     write_selection(ClipboardSel::Primary, &marker).expect("write primary");
     let got = read_selection(ClipboardSel::Primary).expect("read primary");
     assert_eq!(got, marker);
-    let path = super::scratch_dir().join("primary-read-aloud.txt");
-    let _ = std::fs::create_dir_all(super::scratch_dir());
+    let path = scratch_dir().join("primary-read-aloud.txt");
+    let _ = std::fs::create_dir_all(scratch_dir());
     let _ = std::fs::write(&path, format!("primary_ok={got}\n"));
 }

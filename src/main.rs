@@ -152,8 +152,6 @@ fn run_doctor() -> anyhow::Result<()> {
             cleaned.chars().count()
         );
     }
-    let mut no_player: Option<std::process::Child> = None;
-    let _ = crate::audio::stop_playback_if_running(&mut no_player);
 
     // Tree under python_root and/or importable via python_bin site-packages.
     println!(
