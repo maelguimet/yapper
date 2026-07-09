@@ -24,22 +24,123 @@ use std::process::Child;
 use std::time::{Duration, Instant};
 
 /// Minimum window size so controls are not born clipped (Phase 10 / B6).
-const MIN_WINDOW_WIDTH: f32 = 640.0;
-const MIN_WINDOW_HEIGHT: f32 = 520.0;
-const DEFAULT_WINDOW_WIDTH: f32 = 720.0;
-const DEFAULT_WINDOW_HEIGHT: f32 = 860.0;
+const MIN_WINDOW_WIDTH: f32 = 720.0;
+const MIN_WINDOW_HEIGHT: f32 = 560.0;
+const DEFAULT_WINDOW_WIDTH: f32 = 880.0;
+const DEFAULT_WINDOW_HEIGHT: f32 = 720.0;
 /// Max grapheme-ish chars for mic labels in combo chrome (full name on hover).
 const MIC_LABEL_MAX_CHARS: usize = 42;
 /// Minimum multiline rows for transcript / TTS; grows with available height.
 const TEXT_PANEL_MIN_ROWS: usize = 6;
-const TEXT_PANEL_MAX_ROWS: usize = 24;
+const TEXT_PANEL_MAX_ROWS: usize = 28;
 const TEXT_ROW_HEIGHT_EST: f32 = 18.0;
+/// Soft warn when TTS paste is large (still allowed).
+pub const TTS_LONG_TEXT_WARN_CHARS: usize = 800;
+/// Hard-ish warn threshold for very long monologues.
+pub const TTS_VERY_LONG_TEXT_CHARS: usize = 2_500;
 
 /// Which hotkey field is listening for a key-capture press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HotkeyCaptureField {
     ReadAloud,
     PushToTalk,
+}
+
+/// Primary work tabs: STT and TTS are peer workspaces; Settings holds models/hotkeys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainTab {
+    Stt,
+    Tts,
+    Settings,
+}
+
+/// TTS character-count label + optional length warning (pure, tested).
+pub fn tts_text_stats(text: &str) -> (String, Option<String>) {
+    let n = text.chars().count();
+    let label = if n == 1 {
+        "1 character".into()
+    } else {
+        format!("{n} characters")
+    };
+    let warn = if n >= TTS_VERY_LONG_TEXT_CHARS {
+        Some(format!(
+            "Very long text ({n} chars) — synthesis may take a while; streaming splits by sentence."
+        ))
+    } else if n >= TTS_LONG_TEXT_WARN_CHARS {
+        Some(format!(
+            "Long paste ({n} chars) — first audio after the first sentence when streaming."
+        ))
+    } else {
+        None
+    };
+    (label, warn)
+}
+
+/// Empty-state guidance when a work action cannot run yet.
+pub fn stt_empty_guidance(stt_loaded: bool, mic_ok: bool) -> Option<&'static str> {
+    if !mic_ok {
+        return Some("Select a microphone (or system default) before recording.");
+    }
+    if !stt_loaded {
+        return Some("Load STT (Models in Settings, or tray menu) before dictation.");
+    }
+    None
+}
+
+pub fn tts_empty_guidance(tts_loaded: bool, text_empty: bool) -> Option<&'static str> {
+    if text_empty {
+        return Some("Paste or type text to speak, or use Read selection / Speak file.");
+    }
+    if !tts_loaded {
+        return Some("Load TTS before speaking (Settings → Models, or tray menu).");
+    }
+    None
+}
+
+/// Apply a high-contrast dark theme (not default grey soup).
+pub fn apply_yapper_theme(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    let mut visuals = egui::Visuals::dark();
+    visuals.window_fill = egui::Color32::from_rgb(22, 24, 28);
+    visuals.panel_fill = egui::Color32::from_rgb(28, 31, 36);
+    visuals.extreme_bg_color = egui::Color32::from_rgb(18, 20, 24);
+    visuals.faint_bg_color = egui::Color32::from_rgb(36, 40, 48);
+    visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(36, 40, 48);
+    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(48, 54, 64);
+    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(64, 72, 88);
+    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(70, 110, 180);
+    visuals.selection.bg_fill = egui::Color32::from_rgb(50, 100, 180);
+    visuals.override_text_color = Some(egui::Color32::from_rgb(230, 234, 240));
+    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_rgb(200, 206, 216);
+    visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_rgb(220, 226, 236);
+    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    style.spacing.button_padding = egui::vec2(12.0, 6.0);
+    style.visuals = visuals;
+    ctx.set_style(style);
+}
+
+fn section_heading(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(title).strong().size(16.0).color(egui::Color32::from_rgb(
+        140, 190, 255,
+    )));
+    ui.add_space(2.0);
+}
+
+fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).strong())
+            .fill(egui::Color32::from_rgb(50, 110, 200))
+            .min_size(egui::vec2(110.0, 28.0)),
+    )
+}
+
+fn danger_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).strong())
+            .fill(egui::Color32::from_rgb(160, 50, 50))
+            .min_size(egui::vec2(96.0, 28.0)),
+    )
 }
 
 /// Ellipsize long display strings for combo boxes without losing short labels.
@@ -189,6 +290,10 @@ pub struct YapperApp {
     mic_source: String,
     /// Live peak level 0..=1 while recording.
     record_level: f32,
+    /// Main workspace tab (STT / TTS / Settings).
+    main_tab: MainTab,
+    /// Theme applied once after first frame context is ready.
+    theme_applied: bool,
 }
 
 impl YapperApp {
@@ -256,6 +361,8 @@ impl YapperApp {
             mic_list_error: None,
             mic_source,
             record_level: 0.0,
+            main_tab: MainTab::Stt,
+            theme_applied: false,
         };
         app.refresh_mic_sources();
         app
@@ -731,6 +838,163 @@ impl YapperApp {
         }
     }
 
+    fn ui_tab_stt(&mut self, ui: &mut egui::Ui) {
+        section_heading(ui, "Dictation");
+
+        let mic_ok = self.mic_list_error.is_none();
+        if let Some(guide) = stt_empty_guidance(self.workers.stt_loaded(), mic_ok) {
+            ui.colored_label(egui::Color32::from_rgb(255, 200, 100), guide);
+            ui.add_space(4.0);
+        }
+
+        self.ui_mic_controls(ui);
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("Language");
+            egui::ComboBox::from_id_salt("stt_lang")
+                .selected_text(&self.stt_language)
+                .show_ui(ui, |ui| {
+                    for l in ["auto", "en", "fr"] {
+                        ui.selectable_value(&mut self.stt_language, l.into(), l);
+                    }
+                });
+            ui.checkbox(&mut self.copy_transcript, "Also copy transcript to clipboard");
+        });
+
+        if self.recording.is_some() {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "Recording in progress");
+                ui.add(
+                    egui::ProgressBar::new(self.record_level)
+                        .desired_width(ui.available_width().min(280.0))
+                        .text(format!("level {:.0}%", self.record_level * 100.0)),
+                );
+            });
+        }
+
+        ui.add_space(6.0);
+        section_heading(ui, "Transcript");
+        if self.transcript.is_empty() && self.recording.is_none() {
+            ui.weak("Empty — hold the push-to-talk hotkey or press Record.");
+        }
+        let stt_rows = text_panel_rows(ui.available_height(), 0.55);
+        ui.add(
+            egui::TextEdit::multiline(&mut self.transcript)
+                .desired_width(f32::INFINITY)
+                .desired_rows(stt_rows)
+                .hint_text("Transcript appears here…"),
+        );
+    }
+
+    fn ui_tab_tts(&mut self, ui: &mut egui::Ui) {
+        section_heading(ui, "Speak");
+
+        let text_empty = self.tts_text.trim().is_empty();
+        if let Some(guide) = tts_empty_guidance(self.workers.tts_loaded(), text_empty) {
+            ui.colored_label(egui::Color32::from_rgb(255, 200, 100), guide);
+            ui.add_space(4.0);
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Language");
+            egui::ComboBox::from_id_salt("tts_lang")
+                .selected_text(&self.tts_language)
+                .show_ui(ui, |ui| {
+                    for l in ["en", "fr"] {
+                        ui.selectable_value(&mut self.tts_language, l.into(), l);
+                    }
+                });
+            ui.label("Tone");
+            egui::ComboBox::from_id_salt("tts_tone")
+                .selected_text(&self.tts_tone)
+                .show_ui(ui, |ui| {
+                    for t in &self.tones.clone() {
+                        ui.selectable_value(&mut self.tts_tone, t.clone(), t);
+                    }
+                });
+        });
+        ui.checkbox(
+            &mut self.read_clipboard,
+            "Read-aloud hotkey uses clipboard (else primary selection)",
+        );
+
+        ui.add_space(6.0);
+        section_heading(ui, "Text");
+        let (stats, warn) = tts_text_stats(&self.tts_text);
+        ui.horizontal(|ui| {
+            ui.weak(stats);
+            if let Some(w) = &warn {
+                ui.colored_label(egui::Color32::from_rgb(255, 190, 90), w);
+            }
+        });
+        let tts_rows = text_panel_rows(ui.available_height(), 0.55);
+        ui.add(
+            egui::TextEdit::multiline(&mut self.tts_text)
+                .desired_width(f32::INFINITY)
+                .desired_rows(tts_rows)
+                .hint_text("Type or paste text to speak…"),
+        );
+    }
+
+    fn ui_tab_settings(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+        section_heading(ui, "Models");
+        ui.horizontal(|ui| {
+            ui.label("STT model");
+            egui::ComboBox::from_id_salt("stt_model")
+                .selected_text(&self.stt_model)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.stt_model, "small".into(), "small");
+                    ui.selectable_value(&mut self.stt_model, "medium".into(), "medium");
+                });
+            if ui.button("Load STT").clicked() {
+                self.load_stt();
+            }
+            if ui.button("Unload STT").clicked() {
+                self.unload_stt();
+            }
+            ui.label(self.stt_status_label());
+        });
+        ui.horizontal(|ui| {
+            ui.label("TTS");
+            ui.weak("chatterbox-multilingual");
+            if ui.button("Load TTS").clicked() {
+                self.load_tts();
+            }
+            if ui.button("Unload TTS").clicked() {
+                self.unload_tts();
+            }
+            if ui.button("Unload all").clicked() {
+                let _ = self.workers.unload_all();
+                self.status = "all unloaded".into();
+            }
+            ui.label(self.tts_status_label());
+        });
+
+        ui.add_space(10.0);
+        section_heading(ui, "Hotkeys");
+        ui.label(format!(
+            "Live: read-aloud {}  ·  hold-to-talk {}",
+            self.cfg.hotkeys.read_aloud, self.cfg.hotkeys.push_to_talk
+        ));
+        self.ui_hotkey_row(ui, "Read aloud", HotkeyCaptureField::ReadAloud);
+        self.ui_hotkey_row(ui, "Hold-to-talk", HotkeyCaptureField::PushToTalk);
+        ui.weak(
+            "Capture: press a combo in this window, then Apply. Super/Win is read via X11 Mod4.",
+        );
+        if primary_button(ui, "Apply hotkeys").clicked() {
+            self.apply_hotkeys();
+        }
+
+        ui.add_space(10.0);
+        section_heading(ui, "Devices");
+        self.ui_mic_controls(ui);
+
+        ui.add_space(10.0);
+        section_heading(ui, "Session");
+        ui.weak("Close or minimize hides to the tray. Quit only from tray menu or Exit…");
+    }
+
     fn ui_mic_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Microphone");
@@ -799,40 +1063,158 @@ enum CaptureOutcome {
 
 impl eframe::App for YapperApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.theme_applied {
+            apply_yapper_theme(ctx);
+            self.theme_applied = true;
+        }
+
         self.handle_viewport_lifecycle(ctx);
         self.poll_hotkey_capture(ctx);
         self.poll_hotkeys();
         self.poll_tray(ctx);
         self.poll_record_level();
-        // Faster repaint while capturing a hotkey so key events feel immediate.
-        let repaint_ms = if self.hotkey_capture.is_some() || self.tray.is_none() {
+
+        let recording = self.recording.is_some();
+        let repaint_ms = if self.hotkey_capture.is_some() || self.tray.is_none() || recording {
             16
         } else {
             100
         };
         ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
 
+        // ── Top chrome: brand, status, hide ──────────────────────────────
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.heading("Yapper");
+                ui.heading(
+                    egui::RichText::new("Yapper")
+                        .color(egui::Color32::from_rgb(120, 180, 255))
+                        .size(22.0),
+                );
                 ui.separator();
-                ui.label(&self.status);
+                ui.label(
+                    egui::RichText::new(&self.status)
+                        .color(egui::Color32::from_rgb(200, 210, 220)),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .small_button("Hide to tray")
-                        .on_hover_text("Keep running in the top-bar tray")
+                        .button("Hide to tray")
+                        .on_hover_text("Keep process + hotkeys; tray → Open to return")
                         .clicked()
                     {
                         self.hide_to_tray(ctx);
                     }
                 });
             });
+
+            // Compact strip: models + mic + live rec pulse
+            ui.horizontal(|ui| {
+                let stt_col = if self.workers.stt_loaded() {
+                    egui::Color32::from_rgb(100, 220, 140)
+                } else {
+                    egui::Color32::from_rgb(140, 140, 150)
+                };
+                let tts_col = if self.workers.tts_loaded() {
+                    egui::Color32::from_rgb(100, 220, 140)
+                } else {
+                    egui::Color32::from_rgb(140, 140, 150)
+                };
+                ui.colored_label(stt_col, self.stt_status_label());
+                ui.separator();
+                ui.colored_label(tts_col, self.tts_status_label());
+                ui.separator();
+                let mic = truncate_display(&self.active_mic_label(), 28);
+                ui.label(format!("Mic: {mic}"))
+                    .on_hover_text(self.active_mic_label());
+                if recording {
+                    // Pulsing red recording indicator (frame-driven via repaint).
+                    let t = ctx.input(|i| i.time);
+                    let pulse = 0.55 + 0.45 * ((t * 6.0).sin() * 0.5 + 0.5);
+                    let r = (255.0 * pulse) as u8;
+                    ui.colored_label(
+                        egui::Color32::from_rgb(r, 40, 40),
+                        "  ● RECORDING  ",
+                    );
+                }
+            });
+
             if let Some(err) = &self.hotkey_error {
-                ui.colored_label(egui::Color32::YELLOW, err);
+                ui.colored_label(egui::Color32::from_rgb(255, 210, 80), err);
             }
             if let Some(err) = &self.tray_error {
                 ui.colored_label(egui::Color32::from_rgb(255, 120, 80), err);
             }
+            ui.add_space(2.0);
+        });
+
+        // ── Bottom: sticky primary actions for active tab ────────────────
+        egui::TopBottomPanel::bottom("bottom_actions").show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                match self.main_tab {
+                    MainTab::Stt => {
+                        if recording {
+                            if danger_button(ui, "Stop & transcribe").clicked() {
+                                self.ptt_release();
+                            }
+                        } else if primary_button(ui, "Record").clicked() {
+                            self.ptt_press();
+                        }
+                        if ui.button("Transcribe file…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("audio", &["wav", "mp3", "m4a", "flac", "ogg"])
+                                .pick_file()
+                            {
+                                self.do_transcribe_file(path);
+                            }
+                        }
+                        if ui.button("Copy transcript").clicked() {
+                            let _ = x11util::write_clipboard(&self.transcript);
+                        }
+                        if ui.button("Clear").clicked() {
+                            self.transcript.clear();
+                        }
+                    }
+                    MainTab::Tts => {
+                        if primary_button(ui, "Speak").clicked() {
+                            let t = self.tts_text.clone();
+                            self.do_speak(&t);
+                        }
+                        if ui.button("Stop").clicked() {
+                            stop_playback(&mut self.playback);
+                            self.status = "playback stopped".into();
+                        }
+                        if ui.button("Read selection").clicked() {
+                            self.read_aloud();
+                        }
+                        if ui.button("Speak file…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("text", &["txt", "md"])
+                                .pick_file()
+                            {
+                                if let Ok(t) = std::fs::read_to_string(path) {
+                                    self.tts_text = t;
+                                    let t = self.tts_text.clone();
+                                    self.do_speak(&t);
+                                }
+                            }
+                        }
+                    }
+                    MainTab::Settings => {
+                        if ui.button("Save settings").clicked() {
+                            self.persist();
+                            self.status = "settings saved".into();
+                        }
+                        if ui.button("Hide to tray").clicked() {
+                            self.hide_to_tray(ctx);
+                        }
+                        if ui.button("Exit…").clicked() {
+                            self.exit_prompt = self.exit_prompt.on_exit_clicked();
+                        }
+                    }
+                }
+            });
+            ui.add_space(4.0);
         });
 
         if self.exit_prompt == ExitPromptState::AwaitingConfirm {
@@ -865,187 +1247,42 @@ impl eframe::App for YapperApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Tab bar
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (tab, label) in [
+                    (MainTab::Stt, "  Speech → Text  "),
+                    (MainTab::Tts, "  Text → Speech  "),
+                    (MainTab::Settings, "  Settings  "),
+                ] {
+                    let selected = self.main_tab == tab;
+                    let text = if selected {
+                        egui::RichText::new(label).strong()
+                    } else {
+                        egui::RichText::new(label)
+                    };
+                    let btn = egui::Button::new(text).fill(if selected {
+                        egui::Color32::from_rgb(50, 90, 150)
+                    } else {
+                        egui::Color32::from_rgb(40, 44, 52)
+                    });
+                    if ui.add(btn).clicked() {
+                        self.main_tab = tab;
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            ui.separator();
+
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-
-                    ui.collapsing("Models / load", |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("STT model");
-                            egui::ComboBox::from_id_salt("stt_model")
-                                .selected_text(&self.stt_model)
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.stt_model,
-                                        "small".into(),
-                                        "small",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.stt_model,
-                                        "medium".into(),
-                                        "medium",
-                                    );
-                                });
-                            if ui.button("Load STT").clicked() {
-                                self.load_stt();
-                            }
-                            if ui.button("Unload STT").clicked() {
-                                self.unload_stt();
-                            }
-                            ui.label(self.stt_status_label());
-                        });
-                        ui.horizontal(|ui| {
-                            if ui.button("Load TTS").clicked() {
-                                self.load_tts();
-                            }
-                            if ui.button("Unload TTS").clicked() {
-                                self.unload_tts();
-                            }
-                            if ui.button("Unload all").clicked() {
-                                let _ = self.workers.unload_all();
-                                self.status = "all unloaded".into();
-                            }
-                            ui.label(self.tts_status_label());
-                        });
-                    });
-
-                    ui.separator();
-                    ui.heading("Speech to Text");
-                    self.ui_mic_controls(ui);
-                    ui.horizontal(|ui| {
-                        ui.label("Language");
-                        egui::ComboBox::from_id_salt("stt_lang")
-                            .selected_text(&self.stt_language)
-                            .show_ui(ui, |ui| {
-                                for l in ["auto", "en", "fr"] {
-                                    ui.selectable_value(&mut self.stt_language, l.into(), l);
-                                }
-                            });
-                        ui.checkbox(&mut self.copy_transcript, "Copy transcript to clipboard");
-                    });
-                    ui.horizontal(|ui| {
-                        if self.recording.is_none() {
-                            if ui.button("Hold-to-talk (click = start)").clicked() {
-                                self.ptt_press();
-                            }
-                        } else if ui.button("Stop & transcribe").clicked() {
-                            self.ptt_release();
-                        }
-                        if ui.button("Transcribe file…").clicked() {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("audio", &["wav", "mp3", "m4a", "flac", "ogg"])
-                                .pick_file()
-                            {
-                                self.do_transcribe_file(path);
-                            }
-                        }
-                        if ui.button("Copy").clicked() {
-                            let _ = x11util::write_clipboard(&self.transcript);
-                        }
-                        if ui.button("Clear").clicked() {
-                            self.transcript.clear();
-                        }
-                    });
-                    let stt_rows = text_panel_rows(ui.available_height(), 0.28);
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.transcript)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(stt_rows),
-                    );
-
-                    ui.separator();
-                    ui.heading("Text to Speech");
-                    ui.horizontal(|ui| {
-                        ui.label("Language");
-                        egui::ComboBox::from_id_salt("tts_lang")
-                            .selected_text(&self.tts_language)
-                            .show_ui(ui, |ui| {
-                                for l in ["en", "fr"] {
-                                    ui.selectable_value(&mut self.tts_language, l.into(), l);
-                                }
-                            });
-                        ui.label("Tone");
-                        egui::ComboBox::from_id_salt("tts_tone")
-                            .selected_text(&self.tts_tone)
-                            .show_ui(ui, |ui| {
-                                for t in &self.tones.clone() {
-                                    ui.selectable_value(&mut self.tts_tone, t.clone(), t);
-                                }
-                            });
-                    });
-                    ui.checkbox(
-                        &mut self.read_clipboard,
-                        "Read aloud uses clipboard (else primary selection)",
-                    );
-                    ui.horizontal(|ui| {
-                        if ui.button("Speak").clicked() {
-                            let t = self.tts_text.clone();
-                            self.do_speak(&t);
-                        }
-                        if ui.button("Stop").clicked() {
-                            stop_playback(&mut self.playback);
-                            self.status = "playback stopped".into();
-                        }
-                        if ui.button("Speak file…").clicked() {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("text", &["txt", "md"])
-                                .pick_file()
-                            {
-                                if let Ok(t) = std::fs::read_to_string(path) {
-                                    self.tts_text = t;
-                                    let t = self.tts_text.clone();
-                                    self.do_speak(&t);
-                                }
-                            }
-                        }
-                        if ui.button("Read selection/clipboard").clicked() {
-                            self.read_aloud();
-                        }
-                    });
-                    let tts_rows = text_panel_rows(ui.available_height(), 0.28);
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.tts_text)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(tts_rows),
-                    );
-
-                    ui.separator();
-                    ui.heading("Hotkeys");
-                    ui.label(format!(
-                        "Read aloud: {}  |  Hold-to-talk: {}",
-                        self.cfg.hotkeys.read_aloud, self.cfg.hotkeys.push_to_talk
-                    ));
-                    self.ui_hotkey_row(ui, "Read aloud", HotkeyCaptureField::ReadAloud);
-                    self.ui_hotkey_row(ui, "Hold-to-talk", HotkeyCaptureField::PushToTalk);
-                    ui.label(
-                        "Capture: press a combo in the window, then Apply. Super/Win is read via X11 Mod4 on Linux (not only Ctrl/Alt/Shift).",
-                    );
-                    if ui.button("Apply hotkeys & save config").clicked() {
-                        self.apply_hotkeys();
+                    match self.main_tab {
+                        MainTab::Stt => self.ui_tab_stt(ui),
+                        MainTab::Tts => self.ui_tab_tts(ui),
+                        MainTab::Settings => self.ui_tab_settings(ui, ctx),
                     }
-
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        if ui.button("Save settings").clicked() {
-                            self.persist();
-                            self.status = "settings saved".into();
-                        }
-                        if ui
-                            .button("Hide to tray")
-                            .on_hover_text("Close window but keep hotkeys and models")
-                            .clicked()
-                        {
-                            self.hide_to_tray(ctx);
-                        }
-                        if ui
-                            .button("Exit…")
-                            .on_hover_text("Fully quit (same as tray → Quit)")
-                            .clicked()
-                        {
-                            self.exit_prompt = self.exit_prompt.on_exit_clicked();
-                        }
-                    });
                 });
         });
     }
@@ -1126,5 +1363,53 @@ mod tests {
         assert_eq!(text_panel_rows(50.0, 0.28), TEXT_PANEL_MIN_ROWS);
         assert!(text_panel_rows(2000.0, 0.5) <= TEXT_PANEL_MAX_ROWS);
         assert!(text_panel_rows(400.0, 0.28) >= TEXT_PANEL_MIN_ROWS);
+    }
+
+    #[test]
+    fn tts_text_stats_counts_and_warns() {
+        let (s, w) = tts_text_stats("hi");
+        assert_eq!(s, "2 characters");
+        assert!(w.is_none());
+        let (s1, _) = tts_text_stats("x");
+        assert_eq!(s1, "1 character");
+        let long: String = "a".repeat(TTS_LONG_TEXT_WARN_CHARS);
+        let (_, w) = tts_text_stats(&long);
+        assert!(w.unwrap().contains("Long paste"));
+        let huge: String = "b".repeat(TTS_VERY_LONG_TEXT_CHARS);
+        let (_, w2) = tts_text_stats(&huge);
+        assert!(w2.unwrap().contains("Very long"));
+    }
+
+    #[test]
+    fn empty_guidance_for_stt_and_tts() {
+        assert!(stt_empty_guidance(false, true)
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("load stt"));
+        assert!(stt_empty_guidance(true, false)
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("microphone"));
+        assert!(stt_empty_guidance(true, true).is_none());
+        assert!(tts_empty_guidance(false, false)
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("load tts"));
+        assert!(tts_empty_guidance(true, true)
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("paste"));
+        assert!(tts_empty_guidance(true, false).is_none());
+    }
+
+    #[test]
+    fn theme_visuals_are_dark_not_default_grey() {
+        // Structural: apply_yapper_theme is the shipped entry; dark panel fill is intentional.
+        let ctx = egui::Context::default();
+        apply_yapper_theme(&ctx);
+        let v = &ctx.style().visuals;
+        assert!(v.dark_mode);
+        // Custom panel fill from apply_yapper_theme
+        assert_eq!(v.panel_fill, egui::Color32::from_rgb(28, 31, 36));
     }
 }
