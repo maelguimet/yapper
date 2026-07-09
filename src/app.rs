@@ -1,8 +1,8 @@
 //! Main egui window + tray orchestration.
 
 use crate::audio::{
-    list_pulse_sources, play_wav, resolve_mic_source, start_recording, stop_playback,
-    stop_recording, temp_wav_path, PulseSource, RecordingSession,
+    list_pulse_sources, resolve_mic_source, start_recording, stop_recording, temp_wav_path,
+    PulseSource, RecordingSession,
 };
 use crate::config::Config;
 use crate::hotkeys::{
@@ -14,13 +14,14 @@ use crate::lifecycle::{
     ExitPromptState, ShellIntent,
 };
 use crate::policy::Role;
+use crate::segment::split_for_tts;
+use crate::transport::{AudioTransport, TransportStatus};
 use crate::tray::{tray_failure_hint, TrayAction, TrayHandle};
 use crate::workers::{resolve_python_bin, resolve_python_root, WorkerManager};
 use crate::x11util::{self, ClipboardSel};
 use anyhow::Result;
 use eframe::egui;
 use std::path::PathBuf;
-use std::process::Child;
 use std::time::{Duration, Instant};
 
 /// Minimum window size so controls are not born clipped (Phase 10 / B6).
@@ -268,7 +269,17 @@ pub struct YapperApp {
     copy_transcript: bool,
     read_clipboard: bool,
     recording: Option<RecordingSession>,
-    playback: Option<Child>,
+    transport: AudioTransport,
+    /// Remaining TTS segments waiting to synthesize (chunked path).
+    tts_queue: Vec<String>,
+    /// Index of next segment to synth (1-based status uses total).
+    tts_queue_total: usize,
+    /// Cancel flag for in-flight multi-segment speak.
+    tts_cancel: bool,
+    /// Paths of temp WAVs for current monologue (deleted on stop/finish).
+    tts_chunk_paths: Vec<PathBuf>,
+    /// Concatenated last successful monologue for whole-utterance replay when available.
+    tts_last_full_path: Option<PathBuf>,
     hotkeys: Option<HotkeyHub>,
     hotkey_error: Option<String>,
     /// Field currently listening for a key combo (capture picker).
@@ -347,7 +358,12 @@ impl YapperApp {
             copy_transcript,
             read_clipboard,
             recording: None,
-            playback: None,
+            transport: AudioTransport::default(),
+            tts_queue: Vec::new(),
+            tts_queue_total: 0,
+            tts_cancel: false,
+            tts_chunk_paths: Vec::new(),
+            tts_last_full_path: None,
             hotkeys,
             hotkey_error,
             hotkey_capture: None,
@@ -448,13 +464,28 @@ impl YapperApp {
 
     fn arm_hard_quit_and_close(&mut self, ctx: &egui::Context) {
         self.hard_quit_armed = true;
+        self.cancel_tts_pipeline();
         let _ = self.workers.unload_all();
         self.workers.shutdown_all();
-        stop_playback(&mut self.playback);
         if let Some(session) = self.recording.take() {
             let _ = stop_recording(session);
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn cancel_tts_pipeline(&mut self) {
+        self.tts_cancel = true;
+        self.tts_queue.clear();
+        self.tts_queue_total = 0;
+        self.transport.set_pending_queue(false);
+        self.transport.stop();
+        self.cleanup_chunk_temps();
+    }
+
+    fn cleanup_chunk_temps(&mut self) {
+        for p in self.tts_chunk_paths.drain(..) {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     /// Intercept title-bar close / minimize → hide; only hard_quit_armed exits.
@@ -650,6 +681,7 @@ impl YapperApp {
     }
 
     fn unload_tts(&mut self) {
+        self.cancel_tts_pipeline();
         match self.workers.unload(Role::Tts) {
             Ok(()) => self.status = "TTS unloaded".into(),
             Err(e) => self.status = format!("TTS unload error: {e:#}"),
@@ -683,26 +715,126 @@ impl YapperApp {
         }
         if !self.workers.tts_loaded() {
             self.load_tts();
+            if !self.workers.tts_loaded() {
+                return;
+            }
         }
-        let out = temp_wav_path("tts");
+        // Cancel any prior monologue; start chunked pipeline.
+        self.cancel_tts_pipeline();
+        self.tts_cancel = false;
+        let segments = split_for_tts(text);
+        if segments.is_empty() {
+            self.status = "nothing to speak".into();
+            return;
+        }
+        self.tts_queue_total = segments.len();
+        self.tts_queue = segments;
+        self.transport.set_pending_queue(self.tts_queue.len() > 1);
+        self.status = format!("synthesizing 1/{}…", self.tts_queue_total);
+        self.pump_tts_queue();
+    }
+
+    /// Synth next segment if transport is free enough to accept more audio.
+    fn pump_tts_queue(&mut self) {
+        if self.tts_cancel {
+            return;
+        }
+        // Only start next segment when idle/buffering or queue is the first item.
+        let can_start = matches!(
+            self.transport.status(),
+            TransportStatus::Idle | TransportStatus::Buffering
+        );
+        if !can_start {
+            return;
+        }
+        let Some(segment) = self.tts_queue.first().cloned() else {
+            self.transport.set_pending_queue(false);
+            return;
+        };
+        let done = self.tts_queue_total.saturating_sub(self.tts_queue.len()) + 1;
+        self.status = format!("synthesizing {done}/{}…", self.tts_queue_total);
+        let out = temp_wav_path("tts-chunk");
         match self.workers.synthesize(
-            text,
+            &segment,
             &self.tts_language,
             &self.tts_tone,
             &self.cfg.tts.voice,
             &out,
         ) {
             Ok(path) => {
-                stop_playback(&mut self.playback);
-                match play_wav(&path) {
-                    Ok(child) => {
-                        self.playback = Some(child);
-                        self.status = "speaking…".into();
-                    }
-                    Err(e) => self.status = format!("playback error: {e:#}"),
+                let _ = self.tts_queue.remove(0);
+                self.tts_chunk_paths.push(path.clone());
+                self.tts_last_full_path = Some(path.clone());
+                self.transport
+                    .set_pending_queue(!self.tts_queue.is_empty());
+                if let Err(e) = self.transport.play_file(&path) {
+                    self.status = format!("playback error: {e:#}");
+                    return;
+                }
+                if self.tts_queue.is_empty() {
+                    self.status = format!(
+                        "speaking ({})…",
+                        self.transport.machine().format_time_label()
+                    );
+                } else {
+                    self.status = format!(
+                        "speaking {done}/{} — more buffering…",
+                        self.tts_queue_total
+                    );
                 }
             }
-            Err(e) => self.status = format!("synth error: {e:#}"),
+            Err(e) => {
+                // Isolate bad chunk: drop it and try next unless queue empty.
+                let _ = self.tts_queue.remove(0);
+                self.status = format!("segment {done} failed: {e:#}");
+                if !self.tts_queue.is_empty() && !self.tts_cancel {
+                    self.pump_tts_queue();
+                } else {
+                    self.transport.set_pending_queue(false);
+                }
+            }
+        }
+    }
+
+    fn poll_transport(&mut self) {
+        self.transport.tick();
+        // When a chunk ends and more remain, synth+play next.
+        if matches!(
+            self.transport.status(),
+            TransportStatus::Idle | TransportStatus::Buffering
+        ) && !self.tts_queue.is_empty()
+            && !self.tts_cancel
+        {
+            self.pump_tts_queue();
+        } else if self.transport.status() == TransportStatus::Playing {
+            self.status = format!(
+                "speaking ({}) [{}]",
+                self.transport.machine().format_time_label(),
+                self.transport.status().as_str()
+            );
+        } else if self.transport.status() == TransportStatus::Paused {
+            self.status = format!(
+                "paused ({})",
+                self.transport.machine().format_time_label()
+            );
+        } else if self.tts_queue.is_empty()
+            && self.transport.status() == TransportStatus::Idle
+            && self.tts_queue_total > 0
+        {
+            // Finished monologue — leave a quiet ready status once.
+            if self.status.starts_with("speaking") || self.status.starts_with("paused") {
+                self.status = "ready".into();
+                self.tts_queue_total = 0;
+                // Keep last chunk for replay; drop intermediates except last.
+                if let Some(last) = self.tts_chunk_paths.pop() {
+                    for p in self.tts_chunk_paths.drain(..) {
+                        if p != last {
+                            let _ = std::fs::remove_file(p);
+                        }
+                    }
+                    self.tts_chunk_paths.push(last);
+                }
+            }
         }
     }
 
@@ -919,16 +1051,54 @@ impl YapperApp {
             "Read-aloud hotkey uses clipboard (else primary selection)",
         );
 
+        // Transport strip
+        ui.add_space(6.0);
+        section_heading(ui, "Transport");
+        let st = self.transport.status();
+        ui.horizontal(|ui| {
+            ui.label(format!("Status: {}", st.as_str()));
+            ui.separator();
+            ui.label(self.transport.machine().format_time_label());
+            if !self.tts_queue.is_empty() {
+                let left = self.tts_queue.len();
+                ui.separator();
+                ui.colored_label(
+                    egui::Color32::from_rgb(180, 200, 255),
+                    format!("{left} segment(s) queued"),
+                );
+            }
+        });
+        let mut progress = self.transport.machine().progress_01();
+        let scrub = ui.add(
+            egui::Slider::new(&mut progress, 0.0..=1.0)
+                .show_value(false)
+                .text("seek"),
+        );
+        if scrub.changed() {
+            self.transport.seek_progress(progress);
+        }
+        ui.horizontal(|ui| {
+            ui.label("Volume");
+            let mut vol = self.transport.volume();
+            if ui
+                .add(egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false))
+                .changed()
+            {
+                self.transport.set_volume(vol);
+            }
+        });
+
         ui.add_space(6.0);
         section_heading(ui, "Text");
         let (stats, warn) = tts_text_stats(&self.tts_text);
+        let segs = split_for_tts(&self.tts_text).len();
         ui.horizontal(|ui| {
-            ui.weak(stats);
+            ui.weak(format!("{stats} · ~{segs} segment(s)"));
             if let Some(w) = &warn {
                 ui.colored_label(egui::Color32::from_rgb(255, 190, 90), w);
             }
         });
-        let tts_rows = text_panel_rows(ui.available_height(), 0.55);
+        let tts_rows = text_panel_rows(ui.available_height(), 0.45);
         ui.add(
             egui::TextEdit::multiline(&mut self.tts_text)
                 .desired_width(f32::INFINITY)
@@ -1073,13 +1243,19 @@ impl eframe::App for YapperApp {
         self.poll_hotkeys();
         self.poll_tray(ctx);
         self.poll_record_level();
+        self.poll_transport();
 
         let recording = self.recording.is_some();
-        let repaint_ms = if self.hotkey_capture.is_some() || self.tray.is_none() || recording {
-            16
-        } else {
-            100
-        };
+        let playing = matches!(
+            self.transport.status(),
+            TransportStatus::Playing | TransportStatus::Buffering
+        );
+        let repaint_ms =
+            if self.hotkey_capture.is_some() || self.tray.is_none() || recording || playing {
+                16
+            } else {
+                100
+            };
         ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
 
         // ── Top chrome: brand, status, hide ──────────────────────────────
@@ -1180,9 +1356,27 @@ impl eframe::App for YapperApp {
                             let t = self.tts_text.clone();
                             self.do_speak(&t);
                         }
-                        if ui.button("Stop").clicked() {
-                            stop_playback(&mut self.playback);
+                        let pause_label = match self.transport.status() {
+                            TransportStatus::Paused => "Resume",
+                            _ => "Pause",
+                        };
+                        if ui.button(pause_label).clicked() {
+                            self.transport.toggle_pause();
+                        }
+                        if danger_button(ui, "Stop").clicked() {
+                            self.cancel_tts_pipeline();
                             self.status = "playback stopped".into();
+                        }
+                        if ui
+                            .button("Replay")
+                            .on_hover_text("Play last successful audio without re-synthesizing")
+                            .clicked()
+                        {
+                            match self.transport.replay() {
+                                Ok(true) => self.status = "replaying…".into(),
+                                Ok(false) => self.status = "nothing to replay".into(),
+                                Err(e) => self.status = format!("replay error: {e:#}"),
+                            }
                         }
                         if ui.button("Read selection").clicked() {
                             self.read_aloud();
@@ -1289,9 +1483,9 @@ impl eframe::App for YapperApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Only reached on real process exit (hard quit or unexpected teardown).
+        self.cancel_tts_pipeline();
         let _ = self.workers.unload_all();
         self.workers.shutdown_all();
-        stop_playback(&mut self.playback);
         if let Some(session) = self.recording.take() {
             let _ = stop_recording(session);
         }

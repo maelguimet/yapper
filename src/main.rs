@@ -7,6 +7,8 @@ mod hotkeys;
 mod ipc;
 mod lifecycle;
 mod policy;
+mod segment;
+mod transport;
 mod tray;
 mod workers;
 mod x11util;
