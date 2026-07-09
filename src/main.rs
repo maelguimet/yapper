@@ -14,6 +14,7 @@ mod segment;
 mod textprep;
 mod timeouts;
 mod transport;
+mod transport_machine;
 mod tray;
 mod ui;
 mod wavutil;

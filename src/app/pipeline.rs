@@ -427,28 +427,53 @@ impl YapperApp {
     }
 
     fn try_play_next_ready(&mut self) {
+        let status = self.transport.status();
         let can_start = matches!(
-            self.transport.status(),
+            status,
             TransportStatus::Idle | TransportStatus::Buffering
         );
-        if !can_start {
+        // While speaking/paused on mpv IPC, append ready chunks to the live playlist
+        // instead of waiting for end-of-file + respawn.
+        let can_append = matches!(status, TransportStatus::Playing | TransportStatus::Paused)
+            && self.transport.can_append();
+        if !can_start && !can_append {
             return;
         }
-        let Some(chunk) = self.tts.pop_ready() else {
-            if self.tts.pending.is_empty() && !self.tts.synth_in_flight {
+        if self.tts.ready.is_empty() {
+            if can_start
+                && self.tts.pending.is_empty()
+                && !self.tts.synth_in_flight
+            {
                 self.transport.set_pending_queue(false);
                 self.finalize_tts_job_if_done();
             }
             return;
-        };
-        self.transport.set_pending_queue(
-            !self.tts.pending.is_empty()
-                || !self.tts.ready.is_empty()
-                || self.tts.synth_in_flight,
-        );
-        if let Err(e) = self.transport.play_file(&chunk.path) {
-            self.status = format!("playback error: {e:#}");
-            return;
+        }
+        // Drain ready into one persistent player session (start once, then append).
+        while !self.tts.ready.is_empty() {
+            let still_start = matches!(
+                self.transport.status(),
+                TransportStatus::Idle | TransportStatus::Buffering
+            );
+            let still_append = matches!(
+                self.transport.status(),
+                TransportStatus::Playing | TransportStatus::Paused
+            ) && self.transport.can_append();
+            if !still_start && !still_append {
+                break;
+            }
+            let Some(chunk) = self.tts.pop_ready() else {
+                break;
+            };
+            self.transport.set_pending_queue(
+                !self.tts.pending.is_empty()
+                    || !self.tts.ready.is_empty()
+                    || self.tts.synth_in_flight,
+            );
+            if let Err(e) = self.transport.enqueue_or_play(&chunk.path) {
+                self.status = format!("playback error: {e:#}");
+                return;
+            }
         }
         self.update_speak_status();
         // Keep prebuffer full while playing.
@@ -520,21 +545,23 @@ impl YapperApp {
 
     pub(crate) fn poll_transport(&mut self) {
         self.transport.tick();
-        // When player free and ready chunks exist, start next without waiting for synth.
-        if matches!(
-            self.transport.status(),
-            TransportStatus::Idle | TransportStatus::Buffering
-        ) {
-            self.try_play_next_ready();
-        } else if self.transport.status() == TransportStatus::Playing {
-            self.update_speak_status();
-            // Prebuffer while playing.
-            self.pump_tts_synth();
-        } else if self.transport.status() == TransportStatus::Paused {
-            self.status = format!(
-                "paused ({})",
-                self.transport.machine().format_time_label()
-            );
+        // Idle/buffering: start; playing/paused: append ready chunks to live playlist.
+        match self.transport.status() {
+            TransportStatus::Idle | TransportStatus::Buffering => {
+                self.try_play_next_ready();
+            }
+            TransportStatus::Playing => {
+                self.update_speak_status();
+                self.pump_tts_synth();
+                self.try_play_next_ready();
+            }
+            TransportStatus::Paused => {
+                self.status = format!(
+                    "paused ({})",
+                    self.transport.machine().format_time_label()
+                );
+                self.try_play_next_ready();
+            }
         }
         if matches!(self.transport.status(), TransportStatus::Idle)
             && !self.tts.has_work()

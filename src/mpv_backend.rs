@@ -173,6 +173,37 @@ impl MpvBackend {
         Ok(())
     }
 
+    /// Append a file to the running playlist (no kill/respawn). Gap-reducing path
+    /// for multi-chunk Speak: next sentence joins the same mpv process.
+    pub(crate) fn append_file(&mut self, path: &Path) -> Result<()> {
+        if self.fallback {
+            bail!("fallback player cannot append to playlist");
+        }
+        if self.is_ended() {
+            bail!("mpv process already exited; cannot append");
+        }
+        let path_json = serde_json::to_string(path.to_str().context("path utf-8")?)
+            .context("json-escape path")?;
+        let resp = self.command_raw(&format!(r#"["loadfile",{path_json},"append"]"#))?;
+        if !mpv_response_ok(&resp) {
+            bail!("mpv loadfile append failed: {resp}");
+        }
+        Ok(())
+    }
+
+    /// Playlist length when IPC is available (`None` for fallback / errors).
+    /// Used by continuity tests to prove appends land on one process.
+    #[cfg(test)]
+    pub(crate) fn playlist_count(&mut self) -> Option<i64> {
+        if self.fallback {
+            return None;
+        }
+        let resp = self
+            .command_raw(r#"["get_property","playlist-count"]"#)
+            .ok()?;
+        parse_mpv_data_i64(&resp)
+    }
+
     pub(crate) fn time_pos(&mut self) -> Option<f64> {
         if self.fallback {
             return None;
@@ -199,6 +230,11 @@ impl MpvBackend {
             Ok(None) => false,
             Err(_) => true,
         }
+    }
+
+    /// True when this backend can accept `append_file` (live IPC, process up).
+    pub(crate) fn can_append(&mut self) -> bool {
+        self.has_ipc() && !self.is_ended()
     }
 
     pub(crate) fn kill(&mut self) {
@@ -246,7 +282,7 @@ pub fn mpv_response_ok(resp: &str) -> bool {
     v.get("error").and_then(|e| e.as_str()) == Some("success")
 }
 
-pub(crate) fn parse_mpv_data_f64(resp: &str) -> Option<f64> {
+fn parse_mpv_success_data(resp: &str) -> Option<serde_json::Value> {
     // Prefer matching a single response object; also tolerate multi-line buffers.
     let line = if resp.contains('\n') {
         // Without a known request_id, take the first success line with data.
@@ -267,7 +303,19 @@ pub(crate) fn parse_mpv_data_f64(resp: &str) -> Option<f64> {
     if v.get("error").and_then(|e| e.as_str()) != Some("success") {
         return None;
     }
-    v.get("data").and_then(|d| d.as_f64())
+    v.get("data").cloned()
+}
+
+pub(crate) fn parse_mpv_data_f64(resp: &str) -> Option<f64> {
+    parse_mpv_success_data(resp)?.as_f64()
+}
+
+#[cfg(test)]
+pub(crate) fn parse_mpv_data_i64(resp: &str) -> Option<i64> {
+    let data = parse_mpv_success_data(resp)?;
+    data.as_i64()
+        .or_else(|| data.as_u64().map(|u| u as i64))
+        .or_else(|| data.as_f64().map(|f| f as i64))
 }
 
 pub(crate) fn ipc_socket_path() -> PathBuf {
@@ -364,5 +412,11 @@ mod tests {
             r#"{"request_id":1,"error":"success","data":3.5}"#,
         );
         assert_eq!(parse_mpv_data_f64(buf), Some(3.5));
+    }
+
+    #[test]
+    fn parse_mpv_playlist_count_int() {
+        let buf = r#"{"request_id":9,"error":"success","data":3}"#;
+        assert_eq!(parse_mpv_data_i64(buf), Some(3));
     }
 }

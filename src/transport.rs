@@ -1,160 +1,19 @@
 //! Controllable TTS playback transport (pure state machine + mpv IPC backend).
 //!
-//! Replaces fire-and-forget `ffplay` with Play / Pause / Stop / Replay / seek.
+//! Multi-chunk Speak prefers **one** mpv process: the first segment starts the
+//! player; later segments `loadfile … append` onto the same playlist so
+//! inter-sentence gaps are not driven by per-chunk process spawn.
 
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use crate::mpv_backend::{which_bin, wav_duration_secs, MpvBackend};
 
+// Re-export pure machine types for existing callers.
+pub use crate::transport_machine::{TransportMachine, TransportStatus};
+
 // Re-export for callers/tests that timed WAV duration via transport path.
 #[cfg(test)]
 pub use crate::mpv_backend::wav_duration_from_bytes;
-
-
-/// High-level playback status shown in the UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportStatus {
-    Idle,
-    Buffering,
-    Playing,
-    Paused,
-}
-
-impl TransportStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Buffering => "buffering",
-            Self::Playing => "speaking",
-            Self::Paused => "paused",
-        }
-    }
-}
-
-/// Pure transport intent / transition table (no I/O).
-#[derive(Debug, Clone, PartialEq)]
-pub struct TransportMachine {
-    pub status: TransportStatus,
-    /// Seconds into the current timeline (whole utterance or active chunk).
-    pub position_secs: f64,
-    pub duration_secs: f64,
-    /// Path of last successfully loaded audio (for Replay without re-synth).
-    pub last_path: Option<PathBuf>,
-    /// True when a queue is still synthesizing more segments.
-    pub has_pending_queue: bool,
-}
-
-impl Default for TransportMachine {
-    fn default() -> Self {
-        Self {
-            status: TransportStatus::Idle,
-            position_secs: 0.0,
-            duration_secs: 0.0,
-            last_path: None,
-            has_pending_queue: false,
-        }
-    }
-}
-
-impl TransportMachine {
-    pub fn begin_buffering(&mut self) {
-        self.status = TransportStatus::Buffering;
-        self.position_secs = 0.0;
-        self.duration_secs = 0.0;
-    }
-
-    pub fn on_audio_ready(&mut self, path: PathBuf, duration_secs: f64) {
-        self.last_path = Some(path);
-        self.duration_secs = duration_secs.max(0.0);
-        self.position_secs = 0.0;
-        self.status = TransportStatus::Playing;
-    }
-
-    pub fn pause(&mut self) {
-        if self.status == TransportStatus::Playing {
-            self.status = TransportStatus::Paused;
-        }
-    }
-
-    pub fn resume(&mut self) {
-        if self.status == TransportStatus::Paused {
-            self.status = TransportStatus::Playing;
-        }
-    }
-
-    pub fn stop(&mut self) {
-        self.status = TransportStatus::Idle;
-        self.position_secs = 0.0;
-        // Keep last_path for replay.
-        self.has_pending_queue = false;
-    }
-
-    /// Replay last path if any; returns the path to play or None.
-    pub fn replay_request(&mut self) -> Option<PathBuf> {
-        let path = self.last_path.clone()?;
-        self.position_secs = 0.0;
-        self.status = TransportStatus::Playing;
-        Some(path)
-    }
-
-    /// Clamp seek into `[0, duration]`. Returns the clamped position.
-    pub fn seek_to(&mut self, secs: f64) -> f64 {
-        if self.duration_secs <= 0.0 {
-            self.position_secs = 0.0;
-            return 0.0;
-        }
-        let pos = secs.clamp(0.0, self.duration_secs);
-        self.position_secs = pos;
-        if self.status == TransportStatus::Idle && self.last_path.is_some() {
-            self.status = TransportStatus::Paused;
-        }
-        pos
-    }
-
-    pub fn set_position(&mut self, secs: f64) {
-        if self.duration_secs > 0.0 {
-            self.position_secs = secs.clamp(0.0, self.duration_secs);
-        } else {
-            self.position_secs = secs.max(0.0);
-        }
-    }
-
-    pub fn on_playback_ended(&mut self) {
-        if self.has_pending_queue {
-            self.status = TransportStatus::Buffering;
-            self.position_secs = 0.0;
-            self.duration_secs = 0.0;
-        } else {
-            self.status = TransportStatus::Idle;
-            self.position_secs = self.duration_secs;
-        }
-    }
-
-    pub fn progress_01(&self) -> f32 {
-        if self.duration_secs <= 0.0 {
-            return 0.0;
-        }
-        (self.position_secs / self.duration_secs).clamp(0.0, 1.0) as f32
-    }
-
-    pub fn format_time_label(&self) -> String {
-        format!(
-            "{} / {}",
-            format_mmss(self.position_secs),
-            format_mmss(self.duration_secs)
-        )
-    }
-}
-
-pub fn format_mmss(secs: f64) -> String {
-    if !secs.is_finite() || secs < 0.0 {
-        return "0:00".into();
-    }
-    let total = secs.floor() as u64;
-    let m = total / 60;
-    let s = total % 60;
-    format!("{m}:{s:02}")
-}
 
 /// Controllable player using `mpv --input-ipc-server` when available.
 pub struct AudioTransport {
@@ -166,6 +25,10 @@ pub struct AudioTransport {
     last_pos_poll: Option<std::time::Instant>,
     /// Cached duration for current file (avoid re-query every tick).
     duration_known: bool,
+    /// How many files were started or appended on the live backend this session
+    /// (tests: proves multi-chunk did not respawn per sentence).
+    #[cfg(test)]
+    files_on_session: u32,
 }
 
 impl Default for AudioTransport {
@@ -176,6 +39,8 @@ impl Default for AudioTransport {
             volume: 1.0,
             last_pos_poll: None,
             duration_known: false,
+            #[cfg(test)]
+            files_on_session: 0,
         }
     }
 }
@@ -211,10 +76,31 @@ impl AudioTransport {
             .unwrap_or(false)
     }
 
+    /// Live IPC backend that can accept playlist-append (no respawn).
+    pub fn can_append(&mut self) -> bool {
+        self.backend
+            .as_mut()
+            .map(|b| b.can_append())
+            .unwrap_or(false)
+    }
+
+    /// Files loaded onto the current backend session (1 = single start; N = appends).
+    #[cfg(test)]
+    pub fn files_on_session(&self) -> u32 {
+        self.files_on_session
+    }
+
     /// Play a single WAV/audio file (stops any current playback first).
+    ///
+    /// Used by Replay and any explicit replace. Multi-chunk Speak prefers
+    /// [`Self::enqueue_or_play`] so successive sentences share one mpv process.
     pub fn play_file(&mut self, path: &Path) -> Result<()> {
         self.stop_internal(false);
         self.duration_known = false;
+        #[cfg(test)]
+        {
+            self.files_on_session = 0;
+        }
         if !path.is_file() {
             bail!("audio file missing: {}", path.display());
         }
@@ -223,6 +109,10 @@ impl AudioTransport {
         match MpvBackend::start(path, self.volume) {
             Ok(backend) => {
                 self.backend = Some(backend);
+                #[cfg(test)]
+                {
+                    self.files_on_session = 1;
+                }
                 self.machine
                     .on_audio_ready(path.to_path_buf(), duration);
                 self.duration_known = duration > 0.0;
@@ -233,6 +123,10 @@ impl AudioTransport {
                 if which_bin("ffplay") || which_bin("paplay") || which_bin("aplay") {
                     let child = crate::audio::play_wav(path)?;
                     self.backend = Some(MpvBackend::fallback_child(child));
+                    #[cfg(test)]
+                    {
+                        self.files_on_session = 1;
+                    }
                     self.machine
                         .on_audio_ready(path.to_path_buf(), duration);
                     self.duration_known = duration > 0.0;
@@ -243,6 +137,49 @@ impl AudioTransport {
                 }
             }
         }
+    }
+
+    /// Start playback or append onto the live mpv playlist.
+    ///
+    /// When an IPC-backed session is already running, the file is appended
+    /// (`loadfile … append`) — no kill/respawn. Fallback players cannot append
+    /// and only accept work when idle/buffering (caller should wait for end).
+    pub fn enqueue_or_play(&mut self, path: &Path) -> Result<()> {
+        if !path.is_file() {
+            bail!("audio file missing: {}", path.display());
+        }
+        let duration = wav_duration_secs(path).unwrap_or(0.0);
+
+        if self.can_append() {
+            let backend = self.backend.as_mut().expect("can_append implies backend");
+            match backend.append_file(path) {
+                Ok(()) => {
+                    #[cfg(test)]
+                    {
+                        self.files_on_session = self.files_on_session.saturating_add(1);
+                    }
+                    self.machine
+                        .on_chunk_appended(path.to_path_buf(), duration);
+                    return Ok(());
+                }
+                Err(e) => {
+                    // Process may have raced to exit; fall through to fresh start.
+                    eprintln!("yapper: playlist append failed ({e:#}); restarting player");
+                    if let Some(mut b) = self.backend.take() {
+                        b.kill();
+                    }
+                }
+            }
+        }
+
+        // Fallback (no IPC): only start when not already holding a child.
+        if let Some(b) = self.backend.as_mut() {
+            if !b.has_ipc() && !b.is_ended() {
+                bail!("fallback player busy; wait for end before next chunk");
+            }
+        }
+
+        self.play_file(path)
     }
 
     pub fn pause(&mut self) {
@@ -284,6 +221,10 @@ impl AudioTransport {
         self.machine.stop();
         self.last_pos_poll = None;
         self.duration_known = false;
+        #[cfg(test)]
+        {
+            self.files_on_session = 0;
+        }
         if keep_last {
             self.machine.last_path = last;
         } else {
@@ -328,7 +269,7 @@ impl AudioTransport {
         self.seek_secs(dur * progress_01.clamp(0.0, 1.0) as f64);
     }
 
-    /// Poll backend; update position (throttled); detect end-of-file.
+    /// Poll backend; update position (throttled); detect end-of-playlist/process.
     pub fn tick(&mut self) {
         let now = std::time::Instant::now();
         let should_poll_pos = self
@@ -360,6 +301,10 @@ impl AudioTransport {
             if let Some(mut b) = self.backend.take() {
                 b.kill();
             }
+            #[cfg(test)]
+            {
+                self.files_on_session = 0;
+            }
             self.machine.on_playback_ended();
             self.last_pos_poll = None;
         }
@@ -374,138 +319,5 @@ impl AudioTransport {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn machine_play_pause_resume_stop() {
-        let mut m = TransportMachine::default();
-        assert_eq!(m.status, TransportStatus::Idle);
-        m.begin_buffering();
-        assert_eq!(m.status, TransportStatus::Buffering);
-        m.on_audio_ready(PathBuf::from("/tmp/a.wav"), 10.0);
-        assert_eq!(m.status, TransportStatus::Playing);
-        assert_eq!(m.duration_secs, 10.0);
-        m.pause();
-        assert_eq!(m.status, TransportStatus::Paused);
-        m.resume();
-        assert_eq!(m.status, TransportStatus::Playing);
-        m.stop();
-        assert_eq!(m.status, TransportStatus::Idle);
-        assert!(m.last_path.is_some());
-    }
-
-    #[test]
-    fn machine_seek_bounds() {
-        let mut m = TransportMachine::default();
-        m.on_audio_ready(PathBuf::from("/tmp/a.wav"), 12.0);
-        assert_eq!(m.seek_to(-5.0), 0.0);
-        assert_eq!(m.seek_to(100.0), 12.0);
-        assert_eq!(m.seek_to(3.5), 3.5);
-        assert!((m.progress_01() - (3.5 / 12.0) as f32).abs() < 0.001);
-    }
-
-    #[test]
-    fn machine_replay_without_resynth() {
-        let mut m = TransportMachine::default();
-        assert!(m.replay_request().is_none());
-        m.on_audio_ready(PathBuf::from("/tmp/last.wav"), 5.0);
-        m.stop();
-        // last_path survives stop for Replay without re-synth
-        assert_eq!(m.last_path, Some(PathBuf::from("/tmp/last.wav")));
-        let p = m.replay_request().unwrap();
-        assert_eq!(p, PathBuf::from("/tmp/last.wav"));
-        assert_eq!(m.status, TransportStatus::Playing);
-        assert_eq!(m.position_secs, 0.0);
-    }
-
-    #[test]
-    fn transport_replay_false_when_file_missing() {
-        let mut t = AudioTransport::default();
-        t.machine.last_path = Some(PathBuf::from("/tmp/yapper-definitely-missing-replay.wav"));
-        assert_eq!(t.replay().unwrap(), false);
-        assert!(t.machine.last_path.is_none());
-    }
-
-    #[test]
-    fn machine_end_with_pending_goes_buffering() {
-        let mut m = TransportMachine::default();
-        m.on_audio_ready(PathBuf::from("/tmp/a.wav"), 2.0);
-        m.has_pending_queue = true;
-        m.on_playback_ended();
-        assert_eq!(m.status, TransportStatus::Buffering);
-    }
-
-    #[test]
-    fn format_mmss_values() {
-        assert_eq!(format_mmss(0.0), "0:00");
-        assert_eq!(format_mmss(65.2), "1:05");
-        assert_eq!(format_mmss(-1.0), "0:00");
-    }
-
-    #[test]
-    fn status_labels() {
-        assert_eq!(TransportStatus::Playing.as_str(), "speaking");
-        assert_eq!(TransportStatus::Paused.as_str(), "paused");
-    }
-
-    #[test]
-    fn wav_duration_from_minimal_pcm() {
-        // 16000 Hz mono 16-bit, 16000 samples = 1.0s
-        let samples = 16000usize;
-        let mut data = Vec::new();
-        data.extend_from_slice(b"RIFF");
-        data.extend_from_slice(&0u32.to_le_bytes());
-        data.extend_from_slice(b"WAVE");
-        data.extend_from_slice(b"fmt ");
-        data.extend_from_slice(&16u32.to_le_bytes());
-        data.extend_from_slice(&1u16.to_le_bytes());
-        data.extend_from_slice(&1u16.to_le_bytes());
-        data.extend_from_slice(&16000u32.to_le_bytes());
-        data.extend_from_slice(&32000u32.to_le_bytes());
-        data.extend_from_slice(&2u16.to_le_bytes());
-        data.extend_from_slice(&16u16.to_le_bytes());
-        data.extend_from_slice(b"data");
-        let pcm_len = samples * 2;
-        data.extend_from_slice(&(pcm_len as u32).to_le_bytes());
-        data.extend(std::iter::repeat(0u8).take(pcm_len));
-        let riff = (data.len() as u32) - 8;
-        data[4..8].copy_from_slice(&riff.to_le_bytes());
-        let dur = wav_duration_from_bytes(&data).unwrap();
-        assert!((dur - 1.0).abs() < 0.01, "dur={dur}");
-    }
-
-    #[test]
-    fn time_label_format() {
-        let mut m = TransportMachine::default();
-        m.on_audio_ready(PathBuf::from("/tmp/a.wav"), 90.0);
-        m.set_position(45.0);
-        assert_eq!(m.format_time_label(), "0:45 / 1:30");
-    }
-
-    #[test]
-    fn stop_internal_keep_last_semantics() {
-        let mut t = AudioTransport::default();
-        t.machine.last_path = Some(PathBuf::from("/tmp/keep-me.wav"));
-        t.stop_internal(true);
-        assert_eq!(
-            t.machine.last_path,
-            Some(PathBuf::from("/tmp/keep-me.wav")),
-            "keep_last=true must preserve last_path"
-        );
-        t.machine.last_path = Some(PathBuf::from("/tmp/drop-me.wav"));
-        t.stop_internal(false);
-        assert!(
-            t.machine.last_path.is_none(),
-            "keep_last=false must clear last_path"
-        );
-    }
-
-    #[test]
-    fn clear_last_path_discards_replay() {
-        let mut t = AudioTransport::default();
-        t.machine.last_path = Some(PathBuf::from("/tmp/x.wav"));
-        t.clear_last_path();
-        assert!(t.machine.last_path.is_none());
-    }
-}
+#[path = "transport_tests.rs"]
+mod tests;
