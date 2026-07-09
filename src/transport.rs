@@ -265,13 +265,26 @@ impl AudioTransport {
     }
 
     /// Replay last successful file without re-synthesis.
+    ///
+    /// Returns `Ok(false)` when there is no last path, or the file was deleted.
     pub fn replay(&mut self) -> Result<bool> {
-        let Some(path) = self.machine.replay_request() else {
+        let Some(path) = self.machine.last_path.clone() else {
             return Ok(false);
         };
-        // replay_request already set Playing; play_file will reset properly.
+        if !path.is_file() {
+            // Stale path after temp cleanup — clear so UI can show "nothing to replay".
+            self.machine.last_path = None;
+            return Ok(false);
+        }
         self.play_file(&path)?;
         Ok(true)
+    }
+
+    /// Point Replay at a durable file without playing yet (e.g. after Stop cleanup).
+    pub fn remember_path(&mut self, path: PathBuf) {
+        if path.is_file() {
+            self.machine.last_path = Some(path);
+        }
     }
 
     pub fn seek_secs(&mut self, secs: f64) {
@@ -578,10 +591,20 @@ mod tests {
         assert!(m.replay_request().is_none());
         m.on_audio_ready(PathBuf::from("/tmp/last.wav"), 5.0);
         m.stop();
+        // last_path survives stop for Replay without re-synth
+        assert_eq!(m.last_path, Some(PathBuf::from("/tmp/last.wav")));
         let p = m.replay_request().unwrap();
         assert_eq!(p, PathBuf::from("/tmp/last.wav"));
         assert_eq!(m.status, TransportStatus::Playing);
         assert_eq!(m.position_secs, 0.0);
+    }
+
+    #[test]
+    fn transport_replay_false_when_file_missing() {
+        let mut t = AudioTransport::default();
+        t.machine.last_path = Some(PathBuf::from("/tmp/yapper-definitely-missing-replay.wav"));
+        assert_eq!(t.replay().unwrap(), false);
+        assert!(t.machine.last_path.is_none());
     }
 
     #[test]

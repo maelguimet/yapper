@@ -144,6 +144,56 @@ fn danger_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     )
 }
 
+/// Chunk temp files safe to delete after Stop; keep `last_success` for Replay.
+///
+/// Root cause of Replay-after-Stop: deleting every chunk WAV invalidates the
+/// path held by the transport machine. Always retain the last successful file.
+pub fn chunk_paths_to_remove(
+    chunk_paths: &[PathBuf],
+    last_success: Option<&std::path::Path>,
+) -> Vec<PathBuf> {
+    chunk_paths
+        .iter()
+        .filter(|p| match last_success {
+            Some(keep) => p.as_path() != keep,
+            None => true,
+        })
+        .cloned()
+        .collect()
+}
+
+/// Surviving paths after a stop cleanup (0 or 1 entries: the replay file).
+pub fn chunk_paths_retained_for_replay(
+    chunk_paths: &[PathBuf],
+    last_success: Option<&std::path::Path>,
+) -> Vec<PathBuf> {
+    match last_success {
+        Some(keep) if chunk_paths.iter().any(|p| p.as_path() == keep) => {
+            vec![keep.to_path_buf()]
+        }
+        Some(keep) => vec![keep.to_path_buf()],
+        None => Vec::new(),
+    }
+}
+
+/// Resolve the file path Replay should play (must exist on disk).
+pub fn resolve_replay_path(
+    last_success: Option<&std::path::Path>,
+    transport_last: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    if let Some(p) = last_success {
+        if p.is_file() {
+            return Some(p.to_path_buf());
+        }
+    }
+    if let Some(p) = transport_last {
+        if p.is_file() {
+            return Some(p.to_path_buf());
+        }
+    }
+    None
+}
+
 /// Ellipsize long display strings for combo boxes without losing short labels.
 pub fn truncate_display(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
@@ -464,7 +514,7 @@ impl YapperApp {
 
     fn arm_hard_quit_and_close(&mut self, ctx: &egui::Context) {
         self.hard_quit_armed = true;
-        self.cancel_tts_pipeline();
+        self.discard_all_tts_audio();
         let _ = self.workers.unload_all();
         self.workers.shutdown_all();
         if let Some(session) = self.recording.take() {
@@ -473,19 +523,70 @@ impl YapperApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
+    /// Stop queue + playback but **keep** last successful WAV for Replay.
     fn cancel_tts_pipeline(&mut self) {
         self.tts_cancel = true;
         self.tts_queue.clear();
         self.tts_queue_total = 0;
         self.transport.set_pending_queue(false);
         self.transport.stop();
-        self.cleanup_chunk_temps();
+        self.cleanup_chunk_temps_keeping_replay();
     }
 
-    fn cleanup_chunk_temps(&mut self) {
+    /// Delete intermediate chunk temps; retain `tts_last_full_path` on disk.
+    fn cleanup_chunk_temps_keeping_replay(&mut self) {
+        // Prefer durable last-success; fall back to transport path if set.
+        let keep = self
+            .tts_last_full_path
+            .clone()
+            .or_else(|| self.transport.machine().last_path.clone())
+            .filter(|p| p.is_file());
+        let original = std::mem::take(&mut self.tts_chunk_paths);
+        for p in chunk_paths_to_remove(&original, keep.as_deref()) {
+            let _ = std::fs::remove_file(p);
+        }
+        let mut retained = chunk_paths_retained_for_replay(&original, keep.as_deref());
+        if let Some(ref k) = keep {
+            if !retained.iter().any(|p| p == k) {
+                retained.push(k.clone());
+            }
+        }
+        self.tts_chunk_paths = retained;
+        self.tts_last_full_path = keep.clone();
+        if let Some(p) = keep {
+            self.transport.remember_path(p);
+        }
+    }
+
+    /// Full wipe (quit / unload) — no Replay after this.
+    fn discard_all_tts_audio(&mut self) {
+        self.tts_cancel = true;
+        self.tts_queue.clear();
+        self.tts_queue_total = 0;
+        self.transport.set_pending_queue(false);
+        self.transport.stop();
+        self.tts_last_full_path = None;
         for p in self.tts_chunk_paths.drain(..) {
             let _ = std::fs::remove_file(p);
         }
+        // Clear transport last_path by stopping without keep — use play of nothing.
+        // stop() keeps last_path; force clear by replacing transport machine via stop then
+        // dropping the path file already deleted. replay() will then return false.
+    }
+
+    /// Replay last successful synth without re-synthesizing (survives Stop).
+    fn replay_last(&mut self) -> anyhow::Result<bool> {
+        let transport_last = self.transport.machine().last_path.clone();
+        let path = resolve_replay_path(
+            self.tts_last_full_path.as_deref(),
+            transport_last.as_deref(),
+        );
+        let Some(path) = path else {
+            return Ok(false);
+        };
+        self.tts_last_full_path = Some(path.clone());
+        self.transport.play_file(&path)?;
+        Ok(true)
     }
 
     /// Intercept title-bar close / minimize → hide; only hard_quit_armed exits.
@@ -681,7 +782,8 @@ impl YapperApp {
     }
 
     fn unload_tts(&mut self) {
-        self.cancel_tts_pipeline();
+        // Unload frees the model; drop replay audio too (temps not needed).
+        self.discard_all_tts_audio();
         match self.workers.unload(Role::Tts) {
             Ok(()) => self.status = "TTS unloaded".into(),
             Err(e) => self.status = format!("TTS unload error: {e:#}"),
@@ -763,6 +865,13 @@ impl YapperApp {
         ) {
             Ok(path) => {
                 let _ = self.tts_queue.remove(0);
+                // Promote new last-success; drop previous durable WAV if different.
+                if let Some(old) = self.tts_last_full_path.take() {
+                    if old != path {
+                        let _ = std::fs::remove_file(&old);
+                        self.tts_chunk_paths.retain(|p| p != &old);
+                    }
+                }
                 self.tts_chunk_paths.push(path.clone());
                 self.tts_last_full_path = Some(path.clone());
                 self.transport
@@ -1369,10 +1478,12 @@ impl eframe::App for YapperApp {
                         }
                         if ui
                             .button("Replay")
-                            .on_hover_text("Play last successful audio without re-synthesizing")
+                            .on_hover_text(
+                                "Play last successful audio without re-synthesizing (works after Stop)",
+                            )
                             .clicked()
                         {
-                            match self.transport.replay() {
+                            match self.replay_last() {
                                 Ok(true) => self.status = "replaying…".into(),
                                 Ok(false) => self.status = "nothing to replay".into(),
                                 Err(e) => self.status = format!("replay error: {e:#}"),
@@ -1483,7 +1594,7 @@ impl eframe::App for YapperApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Only reached on real process exit (hard quit or unexpected teardown).
-        self.cancel_tts_pipeline();
+        self.discard_all_tts_audio();
         let _ = self.workers.unload_all();
         self.workers.shutdown_all();
         if let Some(session) = self.recording.take() {
@@ -1605,5 +1716,63 @@ mod tests {
         assert!(v.dark_mode);
         // Custom panel fill from apply_yapper_theme
         assert_eq!(v.panel_fill, egui::Color32::from_rgb(28, 31, 36));
+    }
+
+    #[test]
+    fn stop_cleanup_keeps_last_success_for_replay() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("yapper-replay-keep-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("chunk-a.wav");
+        let b = dir.join("chunk-b.wav");
+        let c = dir.join("chunk-c.wav");
+        for p in [&a, &b, &c] {
+            std::fs::write(p, b"RIFF....WAVE").unwrap();
+        }
+        let chunks = vec![a.clone(), b.clone(), c.clone()];
+        let last = c.clone();
+
+        let remove = chunk_paths_to_remove(&chunks, Some(last.as_path()));
+        assert_eq!(remove, vec![a.clone(), b.clone()]);
+        let keep = chunk_paths_retained_for_replay(&chunks, Some(last.as_path()));
+        assert_eq!(keep, vec![c.clone()]);
+
+        // Simulate stop cleanup
+        for p in remove {
+            std::fs::remove_file(p).unwrap();
+        }
+        assert!(!a.is_file());
+        assert!(!b.is_file());
+        assert!(c.is_file(), "last success must survive Stop");
+
+        let resolved = resolve_replay_path(Some(c.as_path()), Some(c.as_path()));
+        assert_eq!(resolved, Some(c.clone()));
+        // If last was deleted (bug path), resolve fails
+        std::fs::remove_file(&c).unwrap();
+        assert!(resolve_replay_path(Some(c.as_path()), Some(c.as_path())).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_replay_prefers_durable_last_over_stale_transport() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("yapper-replay-pref-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.wav");
+        let stale = dir.join("stale.wav");
+        std::fs::write(&good, b"RIFF").unwrap();
+        // stale path does not exist on disk
+        let r = resolve_replay_path(Some(good.as_path()), Some(stale.as_path()));
+        assert_eq!(r, Some(good));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

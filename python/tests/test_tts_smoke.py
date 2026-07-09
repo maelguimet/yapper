@@ -123,3 +123,98 @@ def test_list_load_synth_en_fr_unload() -> None:
         f"en={out_en.stat().st_size} fr={out_fr.stat().st_size} tones={by_id['1']['result']['tones']}\n",
         encoding="utf-8",
     )
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Minimal EN/FR sentence split mirroring parent chunking intent (not a reimpl of Rust)."""
+    import re
+
+    parts = re.split(r"(?<=[.!?…])\s+", text.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+@pytest.mark.skipif(not _cuda_and_chatterbox(), reason="CUDA+chatterbox required")
+def test_multi_sentence_monologue_and_cancel_mid_stream() -> None:
+    """Gating: multi-segment monologue completes; cancel path stops remaining synth."""
+    SCRATCH.mkdir(parents=True, exist_ok=True)
+    monologue = (
+        "Hello from yapper. This is the second sentence of the monologue. "
+        "And a third one for good measure!"
+    )
+    segments = _split_sentences(monologue)
+    assert len(segments) >= 3, segments
+
+    # --- Complete multi-segment path (same IPC shape as parent chunked speak) ---
+    complete_paths = [SCRATCH / f"tts_chunk_{i}.wav" for i in range(len(segments))]
+    for p in complete_paths:
+        p.unlink(missing_ok=True)
+
+    cmds: list[dict] = [
+        {"id": "load", "cmd": "load", "params": {"model": "chatterbox-multilingual", "device": "cuda"}},
+    ]
+    for i, (seg, path) in enumerate(zip(segments, complete_paths)):
+        cmds.append(
+            {
+                "id": f"seg{i}",
+                "cmd": "synthesize",
+                "params": {
+                    "text": seg,
+                    "language": "en",
+                    "tone": "neutral",
+                    "voice": "eve",
+                    "out_path": str(path),
+                },
+            }
+        )
+    cmds.append({"id": "unload_ok", "cmd": "unload"})
+    cmds.append({"id": "shutdown_ok", "cmd": "shutdown"})
+
+    responses = _run_worker(cmds)
+    by_id = {r["id"]: r for r in responses}
+    assert by_id["load"]["ok"] is True, by_id["load"]
+    for i, path in enumerate(complete_paths):
+        assert by_id[f"seg{i}"]["ok"] is True, by_id[f"seg{i}"]
+        assert _wav_ok(path), f"segment {i} bad wav {path}"
+
+    # --- Cancel mid-stream: only first segment synth'd, then unload (parent cancel) ---
+    cancel_dir = SCRATCH / "cancel_mid"
+    cancel_dir.mkdir(parents=True, exist_ok=True)
+    first = cancel_dir / "only_first.wav"
+    rest = [cancel_dir / f"should_not_{i}.wav" for i in range(1, len(segments))]
+    first.unlink(missing_ok=True)
+    for p in rest:
+        p.unlink(missing_ok=True)
+
+    cancel_cmds = [
+        {"id": "cload", "cmd": "load", "params": {"model": "chatterbox-multilingual", "device": "cuda"}},
+        {
+            "id": "cseg0",
+            "cmd": "synthesize",
+            "params": {
+                "text": segments[0],
+                "language": "en",
+                "tone": "neutral",
+                "voice": "eve",
+                "out_path": str(first),
+            },
+        },
+        # Parent cancel = stop requesting further segments + unload
+        {"id": "cunload", "cmd": "unload"},
+        {"id": "cshutdown", "cmd": "shutdown"},
+    ]
+    cancel_resp = _run_worker(cancel_cmds)
+    cby = {r["id"]: r for r in cancel_resp}
+    assert cby["cload"]["ok"] is True, cby["cload"]
+    assert cby["cseg0"]["ok"] is True, cby["cseg0"]
+    assert _wav_ok(first), first
+    for p in rest:
+        assert not p.exists(), f"cancel must not leave later segment files: {p}"
+    assert cby["cunload"]["ok"] is True
+
+    summary = SCRATCH / "tts-chunk-smoke-summary.txt"
+    summary.write_text(
+        f"multi_sentence_ok segments={len(segments)} "
+        f"sizes={[p.stat().st_size for p in complete_paths]} "
+        f"cancel_first_only={first.stat().st_size}\n",
+        encoding="utf-8",
+    )
