@@ -39,19 +39,40 @@ impl MpvBackend {
             .stderr(Stdio::null())
             .spawn()
             .context("spawn mpv")?;
-        // Wait briefly for socket.
+        // Wait briefly for socket; fail if mpv dies or IPC never becomes usable.
         let deadline = Instant::now() + Duration::from_millis(800);
-        while Instant::now() < deadline {
+        let mut backend = Self {
+            child,
+            ipc_path: Some(ipc.clone()),
+            fallback: false,
+        };
+        loop {
+            if let Ok(Some(status)) = backend.child.try_wait() {
+                let _ = std::fs::remove_file(&ipc);
+                bail!("mpv exited before IPC ready (status={status})");
+            }
             if ipc.exists() {
-                break;
+                // Verify we can actually connect.
+                match UnixStream::connect(&ipc) {
+                    Ok(stream) => {
+                        drop(stream);
+                        return Ok(backend);
+                    }
+                    Err(_) => {
+                        // Socket file appeared but not ready yet — keep waiting.
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                backend.kill();
+                bail!("mpv IPC socket not ready within timeout: {}", ipc.display());
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        Ok(Self {
-            child,
-            ipc_path: Some(ipc),
-            fallback: false,
-        })
+    }
+
+    pub(crate) fn has_ipc(&self) -> bool {
+        !self.fallback && self.ipc_path.is_some()
     }
 
     pub(crate) fn fallback_child(child: Child) -> Self {

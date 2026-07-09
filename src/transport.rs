@@ -162,6 +162,10 @@ pub struct AudioTransport {
     backend: Option<MpvBackend>,
     /// Volume 0.0..=1.0
     volume: f32,
+    /// Throttle position/duration IPC polls (not every frame).
+    last_pos_poll: Option<std::time::Instant>,
+    /// Cached duration for current file (avoid re-query every tick).
+    duration_known: bool,
 }
 
 impl Default for AudioTransport {
@@ -170,9 +174,14 @@ impl Default for AudioTransport {
             machine: TransportMachine::default(),
             backend: None,
             volume: 1.0,
+            last_pos_poll: None,
+            duration_known: false,
         }
     }
 }
+
+/// Minimum interval between mpv position polls (~8 Hz).
+const POS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(125);
 
 impl AudioTransport {
     pub fn machine(&self) -> &TransportMachine {
@@ -194,9 +203,18 @@ impl AudioTransport {
         }
     }
 
+    /// True when pause/seek are backed by mpv IPC (not ffplay/paplay fallback).
+    pub fn supports_transport_controls(&self) -> bool {
+        self.backend
+            .as_ref()
+            .map(|b| b.has_ipc())
+            .unwrap_or(false)
+    }
+
     /// Play a single WAV/audio file (stops any current playback first).
     pub fn play_file(&mut self, path: &Path) -> Result<()> {
         self.stop_internal(false);
+        self.duration_known = false;
         if !path.is_file() {
             bail!("audio file missing: {}", path.display());
         }
@@ -207,6 +225,7 @@ impl AudioTransport {
                 self.backend = Some(backend);
                 self.machine
                     .on_audio_ready(path.to_path_buf(), duration);
+                self.duration_known = duration > 0.0;
                 Ok(())
             }
             Err(e) => {
@@ -216,6 +235,7 @@ impl AudioTransport {
                     self.backend = Some(MpvBackend::fallback_child(child));
                     self.machine
                         .on_audio_ready(path.to_path_buf(), duration);
+                    self.duration_known = duration > 0.0;
                     Ok(())
                 } else {
                     self.machine.stop();
@@ -251,18 +271,25 @@ impl AudioTransport {
         self.stop_internal(true);
     }
 
+    /// Clear Replay path (unload / full discard).
+    pub fn clear_last_path(&mut self) {
+        self.machine.last_path = None;
+    }
+
     fn stop_internal(&mut self, keep_last: bool) {
         if let Some(mut b) = self.backend.take() {
             b.kill();
         }
-        let last = if keep_last {
-            self.machine.last_path.clone()
-        } else {
-            self.machine.last_path.clone()
-        };
+        let last = self.machine.last_path.clone();
         self.machine.stop();
+        self.last_pos_poll = None;
+        self.duration_known = false;
         if keep_last {
             self.machine.last_path = last;
+        } else {
+            // Drop last_path only when caller wants a clean slate (new play replaces it).
+            // play_file uses keep_last=false then sets a new path via on_audio_ready.
+            self.machine.last_path = None;
         }
     }
 
@@ -301,16 +328,28 @@ impl AudioTransport {
         self.seek_secs(dur * progress_01.clamp(0.0, 1.0) as f64);
     }
 
-    /// Poll backend; update position; detect end-of-file.
+    /// Poll backend; update position (throttled); detect end-of-file.
     pub fn tick(&mut self) {
+        let now = std::time::Instant::now();
+        let should_poll_pos = self
+            .last_pos_poll
+            .map(|t| now.duration_since(t) >= POS_POLL_INTERVAL)
+            .unwrap_or(true);
+
         let ended = match self.backend.as_mut() {
             Some(b) => {
-                if let Some(pos) = b.time_pos() {
-                    self.machine.set_position(pos);
-                }
-                if let Some(dur) = b.duration() {
-                    if dur > 0.0 {
-                        self.machine.duration_secs = dur;
+                if should_poll_pos {
+                    self.last_pos_poll = Some(now);
+                    if let Some(pos) = b.time_pos() {
+                        self.machine.set_position(pos);
+                    }
+                    if !self.duration_known {
+                        if let Some(dur) = b.duration() {
+                            if dur > 0.0 {
+                                self.machine.duration_secs = dur;
+                                self.duration_known = true;
+                            }
+                        }
                     }
                 }
                 b.is_ended()
@@ -322,6 +361,7 @@ impl AudioTransport {
                 b.kill();
             }
             self.machine.on_playback_ended();
+            self.last_pos_poll = None;
         }
     }
 
@@ -441,5 +481,31 @@ mod tests {
         m.on_audio_ready(PathBuf::from("/tmp/a.wav"), 90.0);
         m.set_position(45.0);
         assert_eq!(m.format_time_label(), "0:45 / 1:30");
+    }
+
+    #[test]
+    fn stop_internal_keep_last_semantics() {
+        let mut t = AudioTransport::default();
+        t.machine.last_path = Some(PathBuf::from("/tmp/keep-me.wav"));
+        t.stop_internal(true);
+        assert_eq!(
+            t.machine.last_path,
+            Some(PathBuf::from("/tmp/keep-me.wav")),
+            "keep_last=true must preserve last_path"
+        );
+        t.machine.last_path = Some(PathBuf::from("/tmp/drop-me.wav"));
+        t.stop_internal(false);
+        assert!(
+            t.machine.last_path.is_none(),
+            "keep_last=false must clear last_path"
+        );
+    }
+
+    #[test]
+    fn clear_last_path_discards_replay() {
+        let mut t = AudioTransport::default();
+        t.machine.last_path = Some(PathBuf::from("/tmp/x.wav"));
+        t.clear_last_path();
+        assert!(t.machine.last_path.is_none());
     }
 }
