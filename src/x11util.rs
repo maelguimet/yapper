@@ -245,9 +245,6 @@ mod tests {
 
     /// Isolated Xvfb + optional openbox so paste never hits the user session.
     struct IsolatedX {
-        /// Xvfb display name (e.g. `:97`) kept for diagnostics/logs.
-        #[allow(dead_code)]
-        display: String,
         xvfb: Child,
         wm: Option<Child>,
         prev_display: Option<String>,
@@ -335,8 +332,8 @@ mod tests {
                 }
             }
 
+            // `display` is applied via env above; only prev_* needed for Drop restore.
             Some(Self {
-                display,
                 xvfb,
                 wm,
                 prev_display,
@@ -596,10 +593,5 @@ mod tests {
         let path = scratch_dir().join("primary-read-aloud.txt");
         let _ = fs::create_dir_all(scratch_dir());
         let _ = fs::write(&path, format!("primary_ok={got}\n"));
-    }
-
-    #[allow(dead_code)]
-    fn _path_used_for_lint(p: &Path) -> bool {
-        p.exists()
     }
 }

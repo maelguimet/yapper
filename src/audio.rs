@@ -28,7 +28,8 @@ pub struct RecordingSession {
 }
 
 impl RecordingSession {
-    #[allow(dead_code)] // used by tests + future UI path reveal
+    /// Mid-record path for tests that assert WAV growth while capture is live.
+    #[cfg(test)]
     pub fn path(&self) -> &Path {
         &self.path
     }

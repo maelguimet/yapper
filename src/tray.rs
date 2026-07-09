@@ -287,8 +287,8 @@ pub fn icon_from_rgba_file(path: &Path) -> Result<Icon> {
     Icon::from_rgba(rgba, w, h).context("Icon::from_rgba")
 }
 
-/// Write a raw RGBA icon file (for assets / tests).
-#[cfg_attr(not(test), allow(dead_code))]
+/// Write a raw RGBA icon file (test helper for round-trip with [`icon_from_rgba_file`]).
+#[cfg(test)]
 pub fn write_rgba_icon_file(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
     let expect = (width as usize) * (height as usize) * 4;
     if rgba.len() != expect {
