@@ -1,6 +1,10 @@
 //! YapperApp pipeline: async load/speak/transcribe via JobHub; transport pump.
 
 use super::messages::{is_live_tts_job, AppMsg, JobCmd};
+use super::state::{
+    follow_up_after_transcribe, recording_status_line, status_after_transcribe_success,
+    RecordingIntent, TranscribeFollowUp,
+};
 use super::YapperApp;
 use crate::audio::{start_recording, stop_recording, temp_wav_path};
 use crate::policy::Role;
@@ -256,6 +260,7 @@ impl YapperApp {
                     Err(e) => {
                         self.status = format!("STT load error: {e}");
                         self.pending_transcribe = None;
+                        self.recording_intent = RecordingIntent::Idle;
                     }
                 }
             }
@@ -291,29 +296,32 @@ impl YapperApp {
                 }
             }
             AppMsg::Transcribed { text } => {
+                // Take intent once so a following success cannot re-insert.
+                let intent = std::mem::replace(&mut self.recording_intent, RecordingIntent::Idle);
                 self.transcript = text.clone();
                 if self.copy_transcript {
                     if let Err(e) = x11util::write_clipboard(&text) {
                         self.status = format!("transcribed; clipboard failed: {e}");
-                        self.insert_after_transcribe = false;
                         return;
                     }
                 }
-                if self.insert_after_transcribe {
-                    self.insert_after_transcribe = false;
-                    if !text.is_empty() {
-                        match x11util::insert_transcript_at_cursor(&text, true) {
-                            Ok(()) => self.status = "inserted transcript".into(),
-                            Err(e) => {
-                                self.status = format!("transcribed; paste failed: {e}");
-                            }
+                let follow = follow_up_after_transcribe(intent, &text);
+                if follow == TranscribeFollowUp::InsertAtCursor {
+                    // X11 paste path: clipboard + ctrl+v only (no Enter).
+                    match x11util::insert_transcript_at_cursor(&text, true) {
+                        Ok(()) => {
+                            self.status = status_after_transcribe_success(follow).into();
                         }
-                        return;
+                        Err(e) => {
+                            self.status = format!("transcribed; paste failed: {e}");
+                        }
                     }
+                    return;
                 }
-                self.status = "transcribed".into();
+                self.status = status_after_transcribe_success(follow).into();
             }
             AppMsg::TranscribeFailed { error, path } => {
+                self.recording_intent = RecordingIntent::Idle;
                 self.status = format!("transcribe error: {error} ({})", path.display());
             }
             AppMsg::TtsChunkReady {
@@ -520,7 +528,9 @@ impl YapperApp {
         self.do_speak(&text);
     }
 
-    pub(crate) fn ptt_press(&mut self) {
+    /// Start mic capture with an explicit intent (GUI panel vs hotkey insert).
+    /// Last writer wins if both paths race; concurrent multi-session is out of scope.
+    pub(crate) fn begin_recording(&mut self, intent: RecordingIntent) {
         if self.recording.is_some() {
             return;
         }
@@ -529,28 +539,58 @@ impl YapperApp {
         match start_recording(&path, &source) {
             Ok(session) => {
                 self.recording = Some(session);
+                self.recording_intent = intent;
                 self.record_level = 0.0;
-                self.status = format!("recording… ({})", self.active_mic_label());
+                self.status = recording_status_line(intent, &self.active_mic_label());
             }
-            Err(e) => self.status = format!("record error: {e:#}"),
+            Err(e) => {
+                self.recording_intent = RecordingIntent::Idle;
+                self.status = format!("record error: {e:#}");
+            }
         }
     }
 
-    pub(crate) fn ptt_release(&mut self) {
+    /// Stop mic and queue transcribe; keeps [`Self::recording_intent`] set at start
+    /// so `Transcribed` knows whether to paste. Short/failed recordings clear intent.
+    pub(crate) fn end_recording(&mut self) {
         if let Some(session) = self.recording.take() {
             self.record_level = 0.0;
             match stop_recording(session) {
                 Ok(path) => {
                     if path.is_file() && path.metadata().map(|m| m.len() > 1000).unwrap_or(false) {
-                        self.insert_after_transcribe = true;
+                        // Intent already set at begin_recording (GUI vs hotkey).
                         self.do_transcribe_file(path);
                     } else {
+                        self.recording_intent = RecordingIntent::Idle;
                         self.status = "recording too short / empty".into();
                     }
                 }
-                Err(e) => self.status = format!("record stop error: {e:#}"),
+                Err(e) => {
+                    self.recording_intent = RecordingIntent::Idle;
+                    self.status = format!("record stop error: {e:#}");
+                }
             }
         }
+    }
+
+    /// Global hold-to-dictate hotkey press — insert at cursor after transcribe.
+    pub(crate) fn ptt_press(&mut self) {
+        self.begin_recording(RecordingIntent::HotkeyInsert);
+    }
+
+    /// Global hold-to-dictate hotkey release.
+    pub(crate) fn ptt_release(&mut self) {
+        self.end_recording();
+    }
+
+    /// Manual Dictate Record — transcript panel only (never paste).
+    pub(crate) fn gui_record_press(&mut self) {
+        self.begin_recording(RecordingIntent::GuiPanel);
+    }
+
+    /// Manual Dictate Stop and transcribe — panel only.
+    pub(crate) fn gui_record_release(&mut self) {
+        self.end_recording();
     }
 
     pub(crate) fn poll_record_level(&mut self) {

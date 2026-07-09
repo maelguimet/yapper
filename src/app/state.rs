@@ -22,6 +22,74 @@ use std::time::{Duration, Instant};
 /// Backoff after a failed config save so we do not spam persist every frame.
 const AUTOSAVE_FAIL_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Why the current (or next completed) mic/file transcribe was started.
+///
+/// GUI Record fills the Transcript panel only; global hold-to-dictate also
+/// pastes at the focused cursor. File pick is always panel-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RecordingIntent {
+    /// No insert pending (idle, or file-transcribe).
+    #[default]
+    Idle,
+    /// Manual Dictate Record/Stop — panel + optional clipboard copy, never paste.
+    GuiPanel,
+    /// Global hold-to-dictate hotkey — paste at cursor after successful Transcribed.
+    HotkeyInsert,
+}
+
+impl RecordingIntent {
+    /// Only hotkey PTT requests insert-at-cursor after transcription.
+    pub(crate) fn wants_insert_at_cursor(self) -> bool {
+        matches!(self, Self::HotkeyInsert)
+    }
+}
+
+/// Post-transcribe follow-up driven by [`RecordingIntent`] (pure; unit-tested).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TranscribeFollowUp {
+    /// Update transcript panel (and optional copy); do not paste.
+    PanelOnly,
+    /// Also paste at cursor via X11 insert path (no Enter).
+    InsertAtCursor,
+}
+
+/// Decide insert vs panel-only from intent + text. Empty text never inserts.
+pub(crate) fn follow_up_after_transcribe(
+    intent: RecordingIntent,
+    text: &str,
+) -> TranscribeFollowUp {
+    if intent.wants_insert_at_cursor() && !text.is_empty() {
+        TranscribeFollowUp::InsertAtCursor
+    } else {
+        TranscribeFollowUp::PanelOnly
+    }
+}
+
+/// Status string after a successful panel fill (and optional insert attempt).
+pub(crate) fn status_after_transcribe_success(follow_up: TranscribeFollowUp) -> &'static str {
+    match follow_up {
+        TranscribeFollowUp::InsertAtCursor => "inserted transcript",
+        TranscribeFollowUp::PanelOnly => "transcribed",
+    }
+}
+
+/// Live status while the mic is open (GUI vs hotkey wording).
+pub(crate) fn recording_status_line(intent: RecordingIntent, mic_label: &str) -> String {
+    match intent {
+        RecordingIntent::Idle => "ready".into(),
+        RecordingIntent::GuiPanel => format!("recording for transcript… ({mic_label})"),
+        RecordingIntent::HotkeyInsert => format!("hold-to-dictate… ({mic_label})"),
+    }
+}
+
+/// Card / chrome label while recording (GUI panel vs PTT insert).
+pub(crate) fn recording_card_label(intent: RecordingIntent) -> &'static str {
+    match intent {
+        RecordingIntent::HotkeyInsert => "Hold-to-dictate",
+        RecordingIntent::GuiPanel | RecordingIntent::Idle => "Recording",
+    }
+}
+
 pub struct YapperApp {
     pub(crate) cfg: Config,
     /// Background job hub owns real WorkerManager (never block UI on synth/load).
@@ -53,8 +121,8 @@ pub struct YapperApp {
     pub(crate) pending_transcribe: Option<PathBuf>,
     /// Pending speak after TTS autoload.
     pub(crate) pending_speak: Option<String>,
-    /// When true, next successful Transcribed also injects at cursor (PTT path).
-    pub(crate) insert_after_transcribe: bool,
+    /// Explicit intent for the open recording / next Transcribed result.
+    pub(crate) recording_intent: RecordingIntent,
     pub(crate) hotkeys: Option<HotkeyHub>,
     pub(crate) hotkey_error: Option<String>,
     pub(crate) hotkey_capture: Option<HotkeyCaptureField>,
@@ -156,7 +224,7 @@ impl YapperApp {
             tts_loading: false,
             pending_transcribe: None,
             pending_speak: None,
-            insert_after_transcribe: false,
+            recording_intent: RecordingIntent::Idle,
             hotkeys,
             hotkey_error,
             hotkey_capture: None,
@@ -331,5 +399,59 @@ mod tests {
     #[test]
     fn autosave_backoff_constant_is_positive() {
         assert!(AUTOSAVE_FAIL_BACKOFF.as_secs() >= 5);
+    }
+
+    /// GUI Record/Stop: panel + optional copy only — never insert at cursor.
+    #[test]
+    fn gui_record_completion_does_not_request_insert() {
+        let intent = RecordingIntent::GuiPanel;
+        assert!(!intent.wants_insert_at_cursor());
+        let follow = follow_up_after_transcribe(intent, "hello from mic");
+        assert_eq!(follow, TranscribeFollowUp::PanelOnly);
+        assert_eq!(status_after_transcribe_success(follow), "transcribed");
+        // Copy toggle is orthogonal: panel-only whether text empty or not.
+        assert_eq!(
+            follow_up_after_transcribe(RecordingIntent::GuiPanel, ""),
+            TranscribeFollowUp::PanelOnly
+        );
+    }
+
+    /// Global hold-to-dictate hotkey PTT: insert at cursor on non-empty text.
+    #[test]
+    fn hotkey_ptt_completion_does_request_insert() {
+        let intent = RecordingIntent::HotkeyInsert;
+        assert!(intent.wants_insert_at_cursor());
+        let follow = follow_up_after_transcribe(intent, "paste me");
+        assert_eq!(follow, TranscribeFollowUp::InsertAtCursor);
+        assert_eq!(
+            status_after_transcribe_success(follow),
+            "inserted transcript"
+        );
+        // Empty transcription must not paste.
+        assert_eq!(
+            follow_up_after_transcribe(RecordingIntent::HotkeyInsert, ""),
+            TranscribeFollowUp::PanelOnly
+        );
+    }
+
+    /// Transcribe file… and any Idle/non-hotkey path never insert.
+    #[test]
+    fn file_transcribe_does_not_insert() {
+        let intent = RecordingIntent::Idle;
+        assert!(!intent.wants_insert_at_cursor());
+        let follow = follow_up_after_transcribe(intent, "from wav file");
+        assert_eq!(follow, TranscribeFollowUp::PanelOnly);
+        assert_eq!(status_after_transcribe_success(follow), "transcribed");
+    }
+
+    #[test]
+    fn recording_labels_distinguish_gui_panel_vs_hotkey_ptt() {
+        assert!(recording_status_line(RecordingIntent::GuiPanel, "mic").contains("transcript"));
+        assert!(recording_status_line(RecordingIntent::HotkeyInsert, "mic").contains("hold-to-dictate"));
+        assert_eq!(recording_card_label(RecordingIntent::GuiPanel), "Recording");
+        assert_eq!(
+            recording_card_label(RecordingIntent::HotkeyInsert),
+            "Hold-to-dictate"
+        );
     }
 }

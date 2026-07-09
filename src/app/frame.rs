@@ -131,7 +131,8 @@ impl eframe::App for YapperApp {
                     MainTab::Dictate => {
                         if recording {
                             if danger_button(ui, "Stop and transcribe").clicked() {
-                                self.ptt_release();
+                                // Panel-only: never paste at cursor (unlike hotkey PTT).
+                                self.gui_record_release();
                             }
                         } else {
                             let rec = ui.add_enabled(
@@ -145,7 +146,7 @@ impl eframe::App for YapperApp {
                                 .min_size(egui::vec2(100.0, 28.0)),
                             );
                             if rec.clicked() {
-                                self.ptt_press();
+                                self.gui_record_press();
                             }
                             if self.stt_loading {
                                 ui.weak("model loading…");
@@ -159,7 +160,8 @@ impl eframe::App for YapperApp {
                                 .add_filter("audio", &["wav", "mp3", "m4a", "flac", "ogg"])
                                 .pick_file()
                             {
-                                self.insert_after_transcribe = false;
+                                self.recording_intent =
+                                    super::state::RecordingIntent::Idle;
                                 self.do_transcribe_file(path);
                             }
                         }

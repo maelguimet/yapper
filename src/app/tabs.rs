@@ -68,9 +68,10 @@ impl YapperApp {
         });
 
         if self.recording.is_some() {
-            card(ui, "Recording", |ui| {
+            let card_title = super::state::recording_card_label(self.recording_intent);
+            card(ui, card_title, |ui| {
                 ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "Recording");
+                    ui.colored_label(egui::Color32::from_rgb(255, 80, 80), card_title);
                     ui.add(
                         egui::ProgressBar::new(self.record_level)
                             .desired_width(ui.available_width().min(320.0))
