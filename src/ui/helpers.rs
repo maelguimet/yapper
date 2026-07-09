@@ -34,12 +34,13 @@ pub fn tts_text_stats(text: &str) -> (String, Option<String>) {
 }
 
 /// Empty-state guidance when a work action cannot run yet.
+/// Model loads auto-run on Record/Speak — do not claim Settings is required.
 pub fn stt_empty_guidance(stt_loaded: bool, mic_ok: bool) -> Option<&'static str> {
     if !mic_ok {
         return Some("Select a microphone before recording.");
     }
     if !stt_loaded {
-        return Some("Load STT in Settings before dictation.");
+        return Some("STT loads on first transcription.");
     }
     None
 }
@@ -49,7 +50,7 @@ pub fn tts_empty_guidance(tts_loaded: bool, text_empty: bool) -> Option<&'static
         return Some("Paste or type text to speak.");
     }
     if !tts_loaded {
-        return Some("Load TTS in Settings before speaking.");
+        return Some("TTS loads on first Speak.");
     }
     None
 }
@@ -131,6 +132,7 @@ pub fn load_status_label(role: &str, loaded: bool, model_id: Option<&str>) -> St
     }
 }
 
+/// Estimate multiline TextEdit rows from available height (share of remaining panel).
 pub fn text_panel_rows(available_height: f32, share: f32) -> usize {
     let budget = (available_height * share).max(TEXT_PANEL_MIN_ROWS as f32 * TEXT_ROW_HEIGHT_EST);
     let rows = (budget / TEXT_ROW_HEIGHT_EST).floor() as usize;
@@ -197,19 +199,26 @@ mod tests {
 
     #[test]
     fn empty_guidance_for_stt_and_tts() {
-        assert!(stt_empty_guidance(false, true)
-            .unwrap()
-            .to_ascii_lowercase()
-            .contains("load stt"));
+        let stt = stt_empty_guidance(false, true).unwrap().to_ascii_lowercase();
+        assert!(
+            stt.contains("loads on first") || stt.contains("transcription"),
+            "{stt}"
+        );
+        assert!(
+            !stt.contains("settings"),
+            "must not require Settings for autoload path: {stt}"
+        );
         assert!(stt_empty_guidance(true, false)
             .unwrap()
             .to_ascii_lowercase()
             .contains("microphone"));
         assert!(stt_empty_guidance(true, true).is_none());
-        assert!(tts_empty_guidance(false, false)
-            .unwrap()
-            .to_ascii_lowercase()
-            .contains("load tts"));
+        let tts = tts_empty_guidance(false, false).unwrap().to_ascii_lowercase();
+        assert!(
+            tts.contains("loads on first") || tts.contains("speak"),
+            "{tts}"
+        );
+        assert!(!tts.contains("settings"), "{tts}");
         assert!(tts_empty_guidance(true, true)
             .unwrap()
             .to_ascii_lowercase()

@@ -1,4 +1,4 @@
-//! egui tabs and controls.
+//! egui tabs and controls — workspaces own the editor; Settings is preferences.
 
 use super::{HotkeyCaptureField, YapperApp, MIC_LABEL_MAX_CHARS};
 use crate::segment::estimate_segment_count;
@@ -7,7 +7,6 @@ use crate::ui::{
     tts_empty_guidance, tts_text_stats,
 };
 use eframe::egui;
-
 
 impl YapperApp {
     pub(crate) fn ui_hotkey_row(&mut self, ui: &mut egui::Ui, label: &str, field: HotkeyCaptureField) {
@@ -41,17 +40,15 @@ impl YapperApp {
     }
 
     pub(crate) fn ui_tab_stt(&mut self, ui: &mut egui::Ui) {
-        section_heading(ui, "Dictation");
-
         let mic_ok = self.mic_list_error.is_none();
-        if let Some(guide) = stt_empty_guidance(self.workers.stt_loaded(), mic_ok) {
+        if let Some(guide) = stt_empty_guidance(self.stt_loaded, mic_ok) {
             ui.colored_label(egui::Color32::from_rgb(255, 200, 100), guide);
             ui.add_space(4.0);
         }
 
-        self.ui_mic_controls(ui);
-        ui.add_space(4.0);
         ui.horizontal(|ui| {
+            self.ui_mic_controls_inline(ui);
+            ui.separator();
             ui.label("Language");
             egui::ComboBox::from_id_salt("stt_lang")
                 .selected_text(&self.stt_language)
@@ -60,13 +57,13 @@ impl YapperApp {
                         ui.selectable_value(&mut self.stt_language, l.into(), l);
                     }
                 });
-            ui.checkbox(&mut self.copy_transcript, "Copy transcript on dictate");
+            ui.checkbox(&mut self.copy_transcript, "Copy on dictate");
         });
 
         if self.recording.is_some() {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "Recording in progress");
+                ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "Recording");
                 ui.add(
                     egui::ProgressBar::new(self.record_level)
                         .desired_width(ui.available_width().min(280.0))
@@ -77,23 +74,21 @@ impl YapperApp {
 
         ui.add_space(6.0);
         section_heading(ui, "Transcript");
-        if self.transcript.is_empty() && self.recording.is_none() {
-            ui.weak("Empty - Record or use hold-to-talk.");
-        }
-        let stt_rows = text_panel_rows(ui.available_height(), 0.55);
-        ui.add(
+        // Editor owns remaining vertical space (not a tiny fixed box in a scroll void).
+        let rows = text_panel_rows(ui.available_height(), 0.9);
+        let avail = ui.available_size();
+        ui.add_sized(
+            [avail.x, avail.y.max(rows as f32 * 18.0)],
             egui::TextEdit::multiline(&mut self.transcript)
                 .desired_width(f32::INFINITY)
-                .desired_rows(stt_rows)
-                .hint_text("Transcript appears here..."),
+                .desired_rows(rows)
+                .hint_text("Transcript appears here…"),
         );
     }
 
     pub(crate) fn ui_tab_tts(&mut self, ui: &mut egui::Ui) {
-        section_heading(ui, "Speak");
-
         let text_empty = self.tts_text.trim().is_empty();
-        if let Some(guide) = tts_empty_guidance(self.workers.tts_loaded(), text_empty) {
+        if let Some(guide) = tts_empty_guidance(self.tts_loaded, text_empty) {
             ui.colored_label(egui::Color32::from_rgb(255, 200, 100), guide);
             ui.add_space(4.0);
         }
@@ -115,38 +110,49 @@ impl YapperApp {
                         ui.selectable_value(&mut self.tts_tone, t.clone(), t);
                     }
                 });
+            ui.checkbox(
+                &mut self.read_clipboard,
+                "Read clipboard (else selection)",
+            );
         });
-        ui.checkbox(
-            &mut self.read_clipboard,
-            "Read clipboard (else selection)",
-        );
 
         // Transport strip
-        ui.add_space(6.0);
-        section_heading(ui, "Transport");
+        ui.add_space(4.0);
         let st = self.transport.status();
         ui.horizontal(|ui| {
-            ui.label(format!("Status: {}", st.as_str()));
+            ui.label(format!("{}", st.as_str()));
             ui.separator();
             ui.label(self.transport.machine().format_time_label());
-            if !self.tts_queue.is_empty() {
-                let left = self.tts_queue.len();
+            if self.tts.active_job.is_some() {
                 ui.separator();
                 ui.colored_label(
                     egui::Color32::from_rgb(180, 200, 255),
-                    format!("{left} segment(s) queued"),
+                    self.tts.progress_label(),
                 );
+            }
+            if !self.transport.supports_transport_controls()
+                && matches!(
+                    st,
+                    crate::transport::TransportStatus::Playing
+                        | crate::transport::TransportStatus::Paused
+                )
+            {
+                ui.separator();
+                ui.weak("mpv required for pause/seek");
             }
         });
         let mut progress = self.transport.machine().progress_01();
-        let scrub = ui.add(
-            egui::Slider::new(&mut progress, 0.0..=1.0)
-                .show_value(false)
-                .text("seek"),
-        );
-        if scrub.changed() {
-            self.transport.seek_progress(progress);
-        }
+        let can_seek = self.transport.supports_transport_controls();
+        ui.add_enabled_ui(can_seek, |ui| {
+            let scrub = ui.add(
+                egui::Slider::new(&mut progress, 0.0..=1.0)
+                    .show_value(false)
+                    .text("seek"),
+            );
+            if scrub.changed() {
+                self.transport.seek_progress(progress);
+            }
+        });
         ui.horizontal(|ui| {
             ui.label("Volume");
             let mut vol = self.transport.volume();
@@ -158,8 +164,7 @@ impl YapperApp {
             }
         });
 
-        ui.add_space(6.0);
-        section_heading(ui, "Text");
+        ui.add_space(4.0);
         let (stats, warn) = tts_text_stats(&self.tts_text);
         let segs = estimate_segment_count(&self.tts_text);
         ui.horizontal(|ui| {
@@ -168,17 +173,20 @@ impl YapperApp {
                 ui.colored_label(egui::Color32::from_rgb(255, 190, 90), w);
             }
         });
-        let tts_rows = text_panel_rows(ui.available_height(), 0.45);
-        ui.add(
+        let rows = text_panel_rows(ui.available_height(), 0.85);
+        let avail = ui.available_size();
+        ui.add_sized(
+            [avail.x, avail.y.max(rows as f32 * 18.0)],
             egui::TextEdit::multiline(&mut self.tts_text)
                 .desired_width(f32::INFINITY)
-                .desired_rows(tts_rows)
-                .hint_text("Type or paste text to speak..."),
+                .desired_rows(rows)
+                .hint_text("Type or paste text to speak…"),
         );
     }
 
     pub(crate) fn ui_tab_settings(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         section_heading(ui, "Models");
+        ui.weak("Daily Speak/Record autoload models. Manual load/unload frees VRAM.");
         ui.horizontal(|ui| {
             ui.label("STT model");
             egui::ComboBox::from_id_salt("stt_model")
@@ -187,7 +195,10 @@ impl YapperApp {
                     ui.selectable_value(&mut self.stt_model, "small".into(), "small");
                     ui.selectable_value(&mut self.stt_model, "medium".into(), "medium");
                 });
-            if ui.button("Load STT").clicked() {
+            if ui
+                .add_enabled(!self.stt_loading, egui::Button::new("Load STT"))
+                .clicked()
+            {
                 self.load_stt();
             }
             if ui.button("Unload STT").clicked() {
@@ -198,15 +209,19 @@ impl YapperApp {
         ui.horizontal(|ui| {
             ui.label("TTS");
             ui.weak("chatterbox-multilingual");
-            if ui.button("Load TTS").clicked() {
+            if ui
+                .add_enabled(!self.tts_loading, egui::Button::new("Load TTS"))
+                .clicked()
+            {
                 self.load_tts();
             }
             if ui.button("Unload TTS").clicked() {
                 self.unload_tts();
             }
             if ui.button("Unload all").clicked() {
-                let _ = self.workers.unload_all();
-                self.status = "all unloaded".into();
+                self.jobs
+                    .send(super::messages::JobCmd::UnloadAll);
+                self.status = "unloading all…".into();
             }
             ui.label(self.tts_status_label());
         });
@@ -219,9 +234,7 @@ impl YapperApp {
         ));
         self.ui_hotkey_row(ui, "Read aloud", HotkeyCaptureField::ReadAloud);
         self.ui_hotkey_row(ui, "Hold-to-talk", HotkeyCaptureField::PushToTalk);
-        ui.weak(
-            "Press Capture, then Apply.",
-        );
+        ui.weak("Press Capture, then Apply. Hotkeys go live only after Apply.");
         if primary_button(ui, "Apply hotkeys").clicked() {
             self.apply_hotkeys();
         }
@@ -233,38 +246,7 @@ impl YapperApp {
 
     pub(crate) fn ui_mic_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label("Microphone");
-            let selected_full = if self.mic_source.is_empty() {
-                "System default".to_string()
-            } else {
-                // Prefer list label when present
-                self.mic_sources
-                    .iter()
-                    .find(|s| s.name == self.mic_source)
-                    .map(|s| s.label())
-                    .unwrap_or_else(|| self.mic_source.clone())
-            };
-            let selected_display = truncate_display(&selected_full, MIC_LABEL_MAX_CHARS);
-            let combo = egui::ComboBox::from_id_salt("mic_source")
-                .selected_text(selected_display)
-                .width(360.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.mic_source, String::new(), "System default");
-                    for src in &self.mic_sources.clone() {
-                        let full = src.label();
-                        let shown = truncate_display(&full, MIC_LABEL_MAX_CHARS);
-                        let response =
-                            ui.selectable_value(&mut self.mic_source, src.name.clone(), shown);
-                        if full.chars().count() > MIC_LABEL_MAX_CHARS {
-                            response.on_hover_text(full);
-                        }
-                    }
-                });
-            combo.response.on_hover_text(&selected_full);
-            if ui.button("Refresh").clicked() {
-                self.refresh_mic_sources();
-                self.status = format!("mic list: {} source(s)", self.mic_sources.len());
-            }
+            self.ui_mic_controls_inline(ui);
         });
         if let Some(err) = &self.mic_list_error {
             ui.colored_label(egui::Color32::YELLOW, format!("mic list: {err}"));
@@ -284,5 +266,38 @@ impl YapperApp {
             });
         }
     }
-}
 
+    fn ui_mic_controls_inline(&mut self, ui: &mut egui::Ui) {
+        ui.label("Mic");
+        let selected_full = if self.mic_source.is_empty() {
+            "System default".to_string()
+        } else {
+            self.mic_sources
+                .iter()
+                .find(|s| s.name == self.mic_source)
+                .map(|s| s.label())
+                .unwrap_or_else(|| self.mic_source.clone())
+        };
+        let selected_display = truncate_display(&selected_full, MIC_LABEL_MAX_CHARS);
+        let combo = egui::ComboBox::from_id_salt("mic_source")
+            .selected_text(selected_display)
+            .width(280.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.mic_source, String::new(), "System default");
+                for src in &self.mic_sources.clone() {
+                    let full = src.label();
+                    let shown = truncate_display(&full, MIC_LABEL_MAX_CHARS);
+                    let response =
+                        ui.selectable_value(&mut self.mic_source, src.name.clone(), shown);
+                    if full.chars().count() > MIC_LABEL_MAX_CHARS {
+                        response.on_hover_text(full);
+                    }
+                }
+            });
+        combo.response.on_hover_text(&selected_full);
+        if ui.button("Refresh").clicked() {
+            self.refresh_mic_sources();
+            self.status = format!("mic list: {} source(s)", self.mic_sources.len());
+        }
+    }
+}
