@@ -4,8 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
 from yapper_common.ipc import Request
-from yapper_tts.worker import TtsWorker
+from yapper_tts.worker import (
+    TtsWorker,
+    _output_sane,
+    _to_float_array,
+    _write_wav,
+)
 
 
 def test_ping_role() -> None:
@@ -73,6 +80,25 @@ def test_synthesize_empty_text() -> None:
     assert not resp.ok
     assert resp.error is not None
     assert resp.error.code == "bad_args"
+
+
+def test_output_sane_rejects_empty_and_silent() -> None:
+    silent = np.zeros(24000, dtype=np.float32)
+    assert not _output_sane("hello world", 0.0, silent)
+    assert not _output_sane("hello world", 1.0, silent)
+    tone = np.sin(np.linspace(0, 100, 24000)).astype(np.float32) * 0.2
+    assert _output_sane("hi", 1.0, tone)
+
+
+def test_write_wav_nan_safe(tmp_path: Path) -> None:
+    arr = np.array([0.0, float("nan"), 0.5, float("inf"), -0.25], dtype=np.float32)
+    out = tmp_path / "n.wav"
+    _write_wav(out, arr, 24000)
+    assert out.is_file()
+    assert out.stat().st_size > 44
+    cleaned = _to_float_array(arr)
+    assert not np.isnan(cleaned).any()
+    assert not np.isinf(cleaned).any()
 
 
 def test_synthesize_bad_language(tmp_path: Path) -> None:

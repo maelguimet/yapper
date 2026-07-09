@@ -151,7 +151,11 @@ class SttWorker:
             )
 
         whisper_lang = None if language == "auto" else language
-        result = self.state.model.transcribe(str(path), language=whisper_lang, fp16=False)
+        # fp16 on CUDA is faster; force False only on CPU.
+        use_fp16 = (self.state.device or "") == "cuda"
+        result = self.state.model.transcribe(
+            str(path), language=whisper_lang, fp16=use_fp16
+        )
         text = str(result.get("text", "")).strip()
         detected = result.get("language") or language
         return Response.success(

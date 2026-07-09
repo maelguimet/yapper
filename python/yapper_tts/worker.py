@@ -169,13 +169,18 @@ class TtsWorker:
         except FileNotFoundError as exc:
             raise TtsError("bad_args", str(exc)) from exc
 
+        import time
+
         log.info(
-            "synthesize lang=%s tone=%s ref=%s chars=%d",
+            "synthesize lang=%s tone=%s ref=%s chars=%d exg=%.3f cfg=%.3f",
             language,
             tone.name,
             tone.ref_wav,
             len(text),
+            tone.exaggeration,
+            tone.cfg_weight,
         )
+        t0 = time.perf_counter()
         try:
             wav = self.state.model.generate(
                 text,
@@ -191,6 +196,43 @@ class TtsWorker:
             raise
 
         sr = self.state.sample_rate or int(getattr(self.state.model, "sr", 24000) or 24000)
+        gen_ms = (time.perf_counter() - t0) * 1000.0
+        duration = _audio_duration_secs(wav, sr)
+        log.info(
+            "synth done chars=%d duration=%.3fs gen_ms=%.0f path=%s",
+            len(text),
+            duration,
+            gen_ms,
+            out_path,
+        )
+
+        # Output sanity: empty / near-silent / absurd duration → retry once with safer knobs.
+        if not _output_sane(text, duration, wav):
+            log.warning(
+                "output sanity failed (duration=%.3fs chars=%d); retry with safer knobs",
+                duration,
+                len(text),
+            )
+            try:
+                wav = self.state.model.generate(
+                    text,
+                    language_id=language,
+                    audio_prompt_path=str(tone.ref_wav),
+                    exaggeration=min(tone.exaggeration, 0.35),
+                    cfg_weight=min(max(tone.cfg_weight, 0.3), 0.5),
+                )
+            except RuntimeError as exc:
+                msg = str(exc).lower()
+                if "out of memory" in msg or ("cuda" in msg and "memory" in msg):
+                    raise TtsError("oom", str(exc)) from exc
+                raise
+            duration = _audio_duration_secs(wav, sr)
+            if not _output_sane(text, duration, wav):
+                raise TtsError(
+                    "bad_output",
+                    f"TTS output failed sanity (duration={duration:.3f}s for {len(text)} chars)",
+                )
+
         _write_wav(out_path, wav, sr)
         return Response.success(
             req.id,
@@ -199,6 +241,8 @@ class TtsWorker:
                 "sample_rate": sr,
                 "tone": tone.name,
                 "language": language,
+                "duration_secs": duration,
+                "gen_ms": gen_ms,
             },
         )
 
@@ -231,8 +275,7 @@ class TtsError(Exception):
         self.message = message
 
 
-def _write_wav(path: Path, wav: Any, sample_rate: int) -> None:
-    """Write tensor/ndarray audio to 16-bit PCM WAV."""
+def _to_float_array(wav: Any) -> Any:
     import numpy as np
 
     if hasattr(wav, "detach"):
@@ -242,7 +285,44 @@ def _write_wav(path: Path, wav: Any, sample_rate: int) -> None:
     arr = np.squeeze(arr)
     if arr.ndim > 1:
         arr = arr[0]
-    # clamp to int16
+    return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _audio_duration_secs(wav: Any, sample_rate: int) -> float:
+    import numpy as np
+
+    arr = _to_float_array(wav)
+    if arr.size == 0 or sample_rate <= 0:
+        return 0.0
+    return float(arr.size) / float(sample_rate)
+
+
+def _output_sane(text: str, duration_secs: float, wav: Any) -> bool:
+    """Reject empty, near-silent, or absurdly short/long audio relative to text."""
+    import numpy as np
+
+    chars = max(len(text.strip()), 1)
+    if duration_secs <= 0.05:
+        return False
+    # ~12 chars/sec spoken upper bound → min duration; allow slack.
+    min_dur = max(0.15, chars / 30.0 * 0.25)
+    max_dur = max(3.0, chars / 8.0 * 4.0)  # very slow speech ceiling
+    if duration_secs < min_dur or duration_secs > max_dur:
+        return False
+    arr = _to_float_array(wav)
+    if arr.size == 0:
+        return False
+    peak = float(np.max(np.abs(arr)))
+    if peak < 1e-4:
+        return False  # near-silent
+    return True
+
+
+def _write_wav(path: Path, wav: Any, sample_rate: int) -> None:
+    """Write tensor/ndarray audio to 16-bit PCM WAV (NaN-safe)."""
+    import numpy as np
+
+    arr = _to_float_array(wav)
     arr = np.clip(arr, -1.0, 1.0)
     pcm = (arr * 32767.0).astype(np.int16)
     with wave.open(str(path), "wb") as wf:
