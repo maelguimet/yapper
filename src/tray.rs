@@ -256,6 +256,7 @@ pub fn icon_from_rgba_file(path: &Path) -> Result<Icon> {
 }
 
 /// Write a raw RGBA icon file (for assets / tests).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn write_rgba_icon_file(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
     let expect = (width as usize) * (height as usize) * 4;
     if rgba.len() != expect {
