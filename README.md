@@ -23,20 +23,32 @@ Whisper (STT) + Chatterbox multilingual (TTS). No cloud STT/TTS APIs.
 
 ### Hard requirements (v1)
 
-| Requirement | Why |
-|-------------|-----|
+The installer **fails** if any hard tool below is missing (message names the tool and what breaks).
+
+| Requirement | Why (what breaks without it) |
+|-------------|------------------------------|
 | Linux **x86_64** | Supported target |
-| **X11** session | Global hotkeys, selection, paste injection |
+| **X11** session (`DISPLAY`) | GUI, tray, global hotkeys, paste injection |
 | **GNOME** (or DE with AppIndicator/SNI tray) | Always-on tray icon (StatusNotifier) |
-| **NVIDIA GPU + CUDA-capable drivers** (`nvidia-smi`) | Fast local models |
+| **NVIDIA GPU + CUDA-capable drivers** (`nvidia-smi`) | Fast local models (CPU is unusably slow) |
 | **Rust** toolchain (`rustc`, `cargo`) | Build the app |
 | **Python 3.10+** | STT/TTS workers |
-| **ffmpeg** (+ **ffplay** optional fallback) | Audio helpers |
-| **mpv** (preferred) | Controllable TTS playback (pause/seek) |
-| **arecord** (`alsa-utils`) | Mic capture (Pulse/PipeWire via ALSA plugin) |
+| **ffmpeg** | Audio decode/helpers for workers and tooling |
+| **arecord** (`alsa-utils`) | Mic capture (dictation / hold-to-talk) |
 | **xclip**, **xdotool** | Clipboard/selection and paste-at-cursor |
 | **PulseAudio or PipeWire** (Pulse compat) | Mic + playback |
-| Disk: **~5–15 GB** free for models + venv | Whisper medium + Chatterbox weights |
+| Disk: **~5–15 GB** free for models + venv | Whisper + Chatterbox weights |
+
+`nvidia-smi` and `DISPLAY` are checked with a clear **WARN** (install continues) because some headless/CI dry-runs still need the script to plan; live GUI+CUDA use still requires them.
+
+### Preferred / optional (installer warns with impact)
+
+| Tool | What you lose if missing |
+|------|--------------------------|
+| **mpv** (preferred) | TTS pause/seek and multi-chunk playlist; falls back to per-file **ffplay**/paplay |
+| **ffplay** | Last-resort TTS player when mpv is missing (usually ships with ffmpeg) |
+| **pactl** | Mic source listing/refresh degraded (Pulse/PipeWire control) |
+| AppIndicator / SNI host | Always-on tray UX may break (see tray section below) |
 
 ### Recommended packages (Debian/Ubuntu/Pop)
 
@@ -54,10 +66,11 @@ sudo apt install -y \
 # GNOME tray: gnome-shell-extension-appindicator (often preinstalled on Pop/Ubuntu)
 ```
 
-### Optional
+### Optional assets
 
 - Existing Eve voice bank at `~/projects/tts/clone` (installer copies/symlinks tones)
 - Extra VRAM headroom (RTX 4070 12 GB class is fine if you unload when using other GPU apps)
+- Whisper **medium** (~1.5 GiB) — not downloaded by default; see install flags below
 
 ### Always-on tray (required for ship UX)
 
@@ -88,10 +101,12 @@ git clone <repo-url> yapper
 cd yapper
 ./install.sh
 # prompts: start on boot? this user / all users / no
-# non-interactive:
+# non-interactive examples:
 #   YAPPER_AUTOSTART=user ./install.sh
 #   YAPPER_AUTOSTART=no ./install.sh
-#   YAPPER_DRY_RUN=1 ./install.sh   # plan only; no mutations
+#   YAPPER_DRY_RUN=1 ./install.sh              # plan only; no cargo/pip/model network
+#   YAPPER_MODELS=small ./install.sh           # default: Whisper small only
+#   YAPPER_MODELS=small,medium ./install.sh    # also pre-fetch medium (~1.5 GiB)
 ```
 
 | What | Where |
@@ -100,6 +115,23 @@ cd yapper
 | Python venv + workers | `~/.local/share/yapper/venv` |
 | Models / voices / logs | `~/.local/share/yapper/` |
 | Config | `~/.config/yapper/config.toml` (`python_bin` = install venv; `python_root` empty) |
+
+#### Installer env flags
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `YAPPER_DRY_RUN=1` | off | Print plan only: dep checks + which Whisper sizes would be ensured. **No** cargo build, pip, model download, or writes under XDG install paths. |
+| `YAPPER_MODELS` | `small` | Comma/space list of Whisper sizes to ensure at install: `small`, `medium`, or `small,medium`. Invalid sizes abort install. |
+| `YAPPER_AUTOSTART` | prompt / skip if non-TTY | `user` \| `all` \| `no` |
+| `YAPPER_DEV_INSTALL=1` | off | Editable `python[dev]` into app venv (dev only; not for daily-driver) |
+| `YAPPER_PREFIX` | `~/.local` | Binary install prefix (`$PREFIX/bin/yapper`) |
+
+#### Whisper model policy
+
+- **Default install** ensures **small only** (faster, less disk). The UI still offers **medium**.
+- **Pre-fetch both:** `YAPPER_MODELS=small,medium ./install.sh` (or re-run download: `YAPPER_MODELS_DIR=~/.local/share/yapper/models python scripts/download_models.py small medium`).
+- **Lazy first use:** if you select a size that is not on disk, the STT worker’s `whisper.load_model(..., download_root=…)` may **network-download** that checkpoint into the models dir on first load. Prefer pre-fetching offline or with `YAPPER_MODELS` if you need a hermetic install.
+- Chatterbox multilingual weights come from Hugging Face cache / first TTS load (same local-only runtime; no cloud TTS API).
 
 ```bash
 yapper doctor   # host + worker ping checks (import from venv)
@@ -110,6 +142,12 @@ Self-contained smoke (isolated temp venv, no checkout on `PYTHONPATH`):
 
 ```bash
 timeout 180s env YAPPER_SCRATCH=/tmp/yapper-smoke ./scripts/smoke_self_contained_install.sh
+```
+
+Installer honesty unit tests (dep classification + `YAPPER_MODELS` parsing, no network):
+
+```bash
+timeout 30s ./scripts/test_install_truth.sh
 ```
 
 ### Dev without install (editable / repo)
