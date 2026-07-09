@@ -22,10 +22,16 @@ impl YapperApp {
         self.transport.set_pending_queue(false);
         self.transport.stop();
         if had_in_flight {
-            // Mid-generate cannot cancel cooperatively — kill TTS worker.
+            // Mid-generate cannot cancel cooperatively. Out-of-band SIGKILL so we
+            // do not wait for the serial job_loop stuck inside synthesize.
+            let killed = self.jobs.kill_tts_now();
+            // Job thread cleans WorkerManager/policy once the killed request returns.
             self.jobs.send(JobCmd::CancelTtsWorker);
             self.tts_loaded = false;
             self.tts_model_id = None;
+            if killed {
+                self.status = "playback stopped (synth cancelled)".into();
+            }
         }
         self.cleanup_chunk_temps_keeping_replay();
     }

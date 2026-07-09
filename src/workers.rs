@@ -83,6 +83,14 @@ impl WorkerManager {
         }
     }
 
+    /// Live OS pid for out-of-band Stop kill (None if worker not running).
+    pub fn worker_pid(&self, role: Role) -> Option<u32> {
+        match role {
+            Role::Stt => self.stt.as_ref().map(|c| c.pid()),
+            Role::Tts => self.tts.as_ref().map(|c| c.pid()),
+        }
+    }
+
     pub fn unload(&mut self, role: Role) -> Result<()> {
         self.unload_timeout(role, timeouts::unload())
     }
@@ -295,9 +303,8 @@ impl WorkerManager {
         ) {
             Ok(r) => r,
             Err(e) => {
-                if is_timeout_error(&e) {
-                    self.kill_worker(Role::Tts);
-                }
+                // Timeout *or* out-of-band Stop kill — drop dead worker + clear policy.
+                self.kill_worker(Role::Tts);
                 return Err(e);
             }
         };

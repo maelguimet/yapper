@@ -126,6 +126,9 @@ impl WorkerClient {
         self.stdin.flush()?;
 
         let deadline = std::time::Instant::now() + timeout;
+        // Short poll slices so out-of-band Stop (SIGKILL of child) is noticed
+        // quickly even if the stdout reader is slow to deliver EOF.
+        const POLL: Duration = Duration::from_millis(100);
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
@@ -138,7 +141,15 @@ impl WorkerClient {
                     timeout
                 );
             }
-            match self.line_rx.recv_timeout(remaining) {
+            // Detect external kill (Stop mid-generate) without waiting full timeout.
+            if let Ok(Some(status)) = self.child.try_wait() {
+                bail!(
+                    "worker {} exited during {cmd} (status={status}) — cancelled or crashed",
+                    self.role
+                );
+            }
+            let slice = remaining.min(POLL);
+            match self.line_rx.recv_timeout(slice) {
                 Ok(Ok(raw)) => {
                     let resp: Response = serde_json::from_str(&raw)
                         .with_context(|| format!("parse response: {raw}"))?;
@@ -150,13 +161,8 @@ impl WorkerClient {
                 }
                 Ok(Err(e)) => bail!("{e}"),
                 Err(RecvTimeoutError::Timeout) => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    bail!(
-                        "worker {} timed out after {:?} on cmd={cmd}",
-                        self.role,
-                        timeout
-                    );
+                    // Slice timeout only — loop and re-check deadline + child.
+                    continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     bail!("worker {} reader disconnected", self.role);
@@ -178,6 +184,11 @@ impl WorkerClient {
         Ok(())
     }
 
+    /// OS pid of the worker process (for out-of-band Stop kill).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Immediate kill without graceful unload (cancel mid-generate).
     pub fn kill_now(&mut self) {
         let _ = self.child.kill();
@@ -187,6 +198,20 @@ impl WorkerClient {
     pub fn is_running(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
+}
+
+/// SIGKILL an OS pid we own (Stop mid-generate). Does not reap; owner waits later.
+pub fn kill_os_pid(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    // Prefer direct kill(2) via `kill` binary — always available on target Linux hosts.
+    let _ = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 impl Drop for WorkerClient {
@@ -238,9 +263,7 @@ mod tests {
         assert_eq!(r.error.as_ref().unwrap().code, "not_loaded");
     }
 
-    /// Fake hanging worker: never replies; request_timeout must return Err and kill.
-    #[test]
-    fn request_timeout_kills_hanging_worker() {
+    fn hanging_client() -> WorkerClient {
         let mut child = Command::new("bash")
             .args(["-c", "while true; do sleep 60; done"])
             .stdin(Stdio::piped())
@@ -271,12 +294,18 @@ mod tests {
                 }
             }
         });
-        let mut client = WorkerClient {
+        WorkerClient {
             child,
             stdin,
             line_rx,
             role: "test".into(),
-        };
+        }
+    }
+
+    /// Fake hanging worker: never replies; request_timeout must return Err and kill.
+    #[test]
+    fn request_timeout_kills_hanging_worker() {
+        let mut client = hanging_client();
         let err = client
             .request_timeout("ping", HashMap::new(), Duration::from_millis(200))
             .expect_err("must timeout");
@@ -289,5 +318,40 @@ mod tests {
             !client.is_running(),
             "child should not still be running after timeout"
         );
+    }
+
+    /// Stop mid-generate path: out-of-band kill unblocks a long request within ~1s
+    /// (must not wait for the full request_timeout deadline).
+    #[test]
+    fn out_of_band_kill_interrupts_hanging_request_within_1s() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        let mut client = hanging_client();
+        let pid = client.pid();
+        let result: Arc<Mutex<Option<Result<Response, String>>>> =
+            Arc::new(Mutex::new(None));
+        let result_bg = Arc::clone(&result);
+        let started = Instant::now();
+        let handle = thread::spawn(move || {
+            let r = client
+                .request_timeout("synthesize", HashMap::new(), Duration::from_secs(120))
+                .map_err(|e| format!("{e:#}"));
+            *result_bg.lock().unwrap() = Some(r);
+            // Client dropped here — reaps if still needed.
+        });
+
+        // Let the blocking request start.
+        thread::sleep(Duration::from_millis(50));
+        kill_os_pid(pid);
+
+        handle.join().expect("request thread");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "out-of-band kill must unblock within 1s, took {elapsed:?} (not full 120s timeout)"
+        );
+        let outcome = result.lock().unwrap().take().expect("result set");
+        assert!(outcome.is_err(), "killed request must fail: {outcome:?}");
     }
 }
