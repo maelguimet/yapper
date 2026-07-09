@@ -161,6 +161,20 @@ HF weights live under `~/.cache/huggingface/hub/models--ResembleAI--chatterbox` 
 - No cloud STT/TTS APIs.
 - Prefer fixing root causes over skipping checks.
 
+### File size (soft / hard caps)
+
+Keep modules readable — **do not grow god-files**.
+
+| Cap | Lines (rough) | Rule |
+|-----|----------------|------|
+| **Soft** | **~300** | Prefer splitting when a file approaches this. New logic goes into a focused module, not “just one more fn” on the pile. |
+| **Hard** | **~500** | Do not land new work that leaves a non-generated source file **over 500 lines** without splitting in the same change set. Rare exception: a single data table or pure test module, noted in the PR/commit. |
+
+**Known offenders (clean up under TODO B28 before more feature work):** `src/app.rs` (~1800), then `audio.rs` / `transport.rs` / `x11util.rs` / `hotkeys.rs` if still over hard cap after app split.
+
+- `cargo build` / install should not scream about **unused functions** — wire them or delete them; avoid papering with `#[allow(dead_code)]` unless the symbol is part of a stable public surface used by tests only (then `#[cfg(test)]` or document why).
+- Prefer **thin `eframe::App` / `main`** orchestration; UI tabs, theme, transport queue, tray lifecycle as separate modules.
+
 ---
 
 ## Agent / test discipline (mandatory)
