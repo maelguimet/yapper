@@ -269,14 +269,14 @@ Tips:
 ```
 yapper/
   AGENTS.md
-  TODO.md
-  HANDOFF.md
   README.md
+  LICENSE
+  CONTRIBUTING.md
   install.sh
   Cargo.toml
-  src/                 # Rust shell (GUI, tray, hotkeys, IPC client)
-  python/              # STT/TTS workers + shared IPC
-  scripts/             # download_models.py, install_voices.sh
+  src/
+  python/
+  scripts/
   docs/
 ```
 

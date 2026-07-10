@@ -45,3 +45,8 @@ __pycache__/
 # Installer local state
 .dist/
 build/
+
+# Internal planning (keep locally; not for public clones)
+TODO.md
+GOAL.md
+HANDOFF.md

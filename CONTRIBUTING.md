@@ -23,6 +23,8 @@ GPU-marked tests are optional (`pytest -m gpu`).
 - Do not commit model weights, proprietary voice WAVs, secrets, or machine-specific paths.
 - Prefer small, reviewable commits with tests for behavior changes.
 
+Public roadmap: use **GitHub Issues**; internal scratch boards (`TODO.md`, `GOAL.md`, `HANDOFF.md`) are gitignored and stay on maintainer machines only.
+
 ## API and agent clients
 
 If you change `src/app/tts_api.rs` or `scripts/yapper-tts`, update `docs/tts-api.md` and `docs/agent-tts-tool.md` in the same change.

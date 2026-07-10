@@ -3,7 +3,7 @@
 Local tray app for **STT + TTS** on Linux (no cloud APIs). Hybrid: **Rust** shell (GUI/tray/hotkeys) + **typed Python** workers (Whisper + Chatterbox).
 
 **Repo:** clone anywhere (e.g. `~/projects/yapper`)
-**After `/clear`:** read this file, then `TODO.md`, then `docs/design.md`.
+**After `/clear`:** read this file, then `README.md` and `docs/design.md`.
 
 ---
 
@@ -146,7 +146,7 @@ HF weights live under `~/.cache/huggingface/hub/models--ResembleAI--chatterbox` 
 
 - Rust: small modules, explicit errors (`thiserror`/`anyhow`), no `unwrap` in production paths without comment.
 - Python: typed functions, no bare `except:`, workers must exit cleanly on unload and free GPU (`torch.cuda.empty_cache()` before exit is optional if process dies).
-- Do not commit model weights or large WAVs; install copies/symlinks Eve assets from `tts/clone` at setup.
+- Do not commit model weights or large WAVs; use `scripts/install_voices.sh` for reference audio.
 - No cloud STT/TTS APIs.
 - Prefer fixing root causes over skipping checks.
 
