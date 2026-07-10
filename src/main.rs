@@ -190,6 +190,15 @@ fn run_doctor() -> anyhow::Result<()> {
         "  voice refs: {n_voices} wav(s) in {}",
         voices_root.display()
     );
+    let neutral = crate::ui::neutral_ref_wav(&voices_root);
+    if crate::ui::neutral_voice_present(&voices_root) {
+        println!("  eve_neutral: ok ({})", neutral.display());
+    } else {
+        println!(
+            "  eve_neutral: MISSING — Speak disabled until scripts/install_voices.sh (YAPPER_VOICES_DIR={})",
+            voices_root.display()
+        );
+    }
 
     doctor_mic_probe(&cfg);
 

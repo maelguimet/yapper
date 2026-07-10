@@ -22,27 +22,8 @@ use std::time::{Duration, Instant};
 /// Backoff after a failed config save so we do not spam persist every frame.
 const AUTOSAVE_FAIL_BACKOFF: Duration = Duration::from_secs(30);
 
-/// Why the current (or next completed) mic/file transcribe was started.
-///
-/// GUI Record fills the Transcript panel only; global hold-to-dictate also
-/// pastes at the focused cursor. File pick is always panel-only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum RecordingIntent {
-    /// No insert pending (idle, or file-transcribe).
-    #[default]
-    Idle,
-    /// Manual Dictate Record/Stop — panel + optional clipboard copy, never paste.
-    GuiPanel,
-    /// Global hold-to-dictate hotkey — paste at cursor after successful Transcribed.
-    HotkeyInsert,
-}
-
-impl RecordingIntent {
-    /// Only hotkey PTT requests insert-at-cursor after transcription.
-    pub(crate) fn wants_insert_at_cursor(self) -> bool {
-        matches!(self, Self::HotkeyInsert)
-    }
-}
+// Re-export for pipeline/UI modules that historically imported from state.
+pub(crate) use super::messages::RecordingIntent;
 
 /// Post-transcribe follow-up driven by [`RecordingIntent`] (pure; unit-tested).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,12 +98,17 @@ pub struct YapperApp {
     pub(crate) tts_model_id: Option<String>,
     pub(crate) stt_loading: bool,
     pub(crate) tts_loading: bool,
-    /// Pending transcribe after autoload.
-    pub(crate) pending_transcribe: Option<PathBuf>,
+    /// Pending transcribe after STT autoload (path + intent; job_id assigned on send).
+    pub(crate) pending_transcribe: Option<(PathBuf, RecordingIntent)>,
     /// Pending speak after TTS autoload.
     pub(crate) pending_speak: Option<String>,
-    /// Explicit intent for the open recording / next Transcribed result.
+    /// Intent for the open mic session only (UI labels / release matching).
+    /// Completion uses job-scoped intent on Transcribed, not this alone.
     pub(crate) recording_intent: RecordingIntent,
+    /// Live STT job id; stale Transcribed/Failed results are ignored.
+    pub(crate) live_stt_job: Option<u64>,
+    /// Monotonic allocator for STT transcribe job ids.
+    pub(crate) next_stt_job_id: u64,
     pub(crate) hotkeys: Option<HotkeyHub>,
     pub(crate) hotkey_error: Option<String>,
     pub(crate) hotkey_capture: Option<HotkeyCaptureField>,
@@ -232,6 +218,8 @@ impl YapperApp {
             pending_transcribe: None,
             pending_speak: None,
             recording_intent: RecordingIntent::Idle,
+            live_stt_job: None,
+            next_stt_job_id: 1,
             hotkeys,
             hotkey_error,
             hotkey_capture: None,

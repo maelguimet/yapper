@@ -119,6 +119,12 @@ def list_tone_names(voices_root: Path | None = None) -> list[str]:
     return list(DEFAULT_TONES)
 
 
+def neutral_voice_present(voices_root: Path | None = None) -> bool:
+    """True when eve_neutral.wav exists under the resolved voices root."""
+    root = voices_root if voices_root is not None else resolve_voices_root()
+    return (root / "eve_neutral.wav").is_file()
+
+
 def resolve_tone(name: str, voices_root: Path | None = None, voice: str = "eve") -> ToneSpec:
     root = voices_root or resolve_voices_root()
     tone = (name or "neutral").strip().lower()

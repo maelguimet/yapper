@@ -223,15 +223,21 @@ def _long_prose() -> str:
     )
 
 
-def test_synthesize_retry_updates_gen_ms_and_duration(tmp_path: Path) -> None:
+def test_synthesize_retry_updates_gen_ms_and_duration(
+    tmp_path: Path, monkeypatch
+) -> None:
     """Sanity fail then ok: one retry; metadata reflects total work and padded wav."""
+    # Isolate from host Eve assets — worker only needs a stub ref wav path.
+    (tmp_path / "eve_neutral.wav").write_bytes(b"RIFF....WAVE")
+    monkeypatch.setenv("YAPPER_VOICES_DIR", str(tmp_path))
+    monkeypatch.delenv("YAPPER_TTS_CLONE", raising=False)
     text = _long_prose()
     sr = 24000
     bad = _tone(int(sr * 0.2))  # too short for long text
     good_secs = max(min_sane_duration_secs(text) + 0.5, 6.0)
     good = _tone(int(sr * good_secs))
     model = _ScriptedModel([bad, good], delay_s=0.02)
-    w = TtsWorker()
+    w = TtsWorker(voices_root=tmp_path)
     w.state.model = model
     w.state.model_name = "chatterbox-multilingual"
     w.state.sample_rate = sr
@@ -261,13 +267,18 @@ def test_synthesize_retry_updates_gen_ms_and_duration(tmp_path: Path) -> None:
         assert wf.getnframes() == int(sr * good_secs) + pad_n
 
 
-def test_synthesize_double_bad_output_skips_with_code(tmp_path: Path) -> None:
+def test_synthesize_double_bad_output_skips_with_code(
+    tmp_path: Path, monkeypatch
+) -> None:
     """Two insane outputs → bad_output so host can skip the segment."""
+    (tmp_path / "eve_neutral.wav").write_bytes(b"RIFF....WAVE")
+    monkeypatch.setenv("YAPPER_VOICES_DIR", str(tmp_path))
+    monkeypatch.delenv("YAPPER_TTS_CLONE", raising=False)
     text = _long_prose()
     sr = 24000
     bad = _tone(int(sr * 0.2))
     model = _ScriptedModel([bad, bad])
-    w = TtsWorker()
+    w = TtsWorker(voices_root=tmp_path)
     w.state.model = model
     w.state.model_name = "chatterbox-multilingual"
     w.state.sample_rate = sr

@@ -91,6 +91,13 @@ impl YapperApp {
             self.status = "nothing to speak".into();
             return;
         }
+        let voices = std::path::Path::new(self.cfg.models.voices_dir.trim());
+        if !crate::ui::neutral_voice_present(voices) {
+            self.status = crate::ui::voice_missing_guidance(false)
+                .unwrap_or("missing eve_neutral.wav")
+                .into();
+            return;
+        }
         if !self.tts_loaded {
             self.pending_speak = Some(text);
             self.load_tts();

@@ -111,7 +111,13 @@ impl YapperApp {
 
     pub(crate) fn ui_tab_speak(&mut self, ui: &mut egui::Ui) {
         let text_empty = self.tts_text.trim().is_empty();
-        if let Some(guide) = tts_empty_guidance(self.tts_loaded, text_empty) {
+        let voice_ok = crate::ui::neutral_voice_present(std::path::Path::new(
+            self.cfg.models.voices_dir.trim(),
+        ));
+        if let Some(guide) = crate::ui::voice_missing_guidance(voice_ok) {
+            ui.colored_label(egui::Color32::from_rgb(255, 180, 80), guide);
+            ui.add_space(4.0);
+        } else if let Some(guide) = tts_empty_guidance(self.tts_loaded, text_empty) {
             if tts_guidance_is_warning(self.tts_loaded, text_empty) {
                 ui.colored_label(egui::Color32::from_rgb(255, 200, 100), guide);
             } else {
@@ -282,9 +288,8 @@ impl YapperApp {
                         self.unload_tts();
                     }
                     if ui.button("Unload all").clicked() {
-                        self.jobs
-                            .send(super::messages::JobCmd::UnloadAll);
-                        self.status = "unloading all…".into();
+                        // Shared stop/OOB-kill/cleanup then UnloadAll (not bare enqueue).
+                        self.unload_all_models();
                     }
                     ui.weak(self.tts_status_label());
                 });

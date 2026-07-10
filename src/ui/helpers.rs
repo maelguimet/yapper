@@ -186,6 +186,35 @@ pub fn tts_guidance_is_warning(_tts_loaded: bool, text_empty: bool) -> bool {
     false
 }
 
+/// Path to the required Eve neutral reference under a voices root.
+pub fn neutral_ref_wav(voices_dir: &std::path::Path) -> std::path::PathBuf {
+    voices_dir.join("eve_neutral.wav")
+}
+
+/// True when `eve_neutral.wav` exists at the configured voices root.
+pub fn neutral_voice_present(voices_dir: &std::path::Path) -> bool {
+    if voices_dir.as_os_str().is_empty() {
+        return false;
+    }
+    neutral_ref_wav(voices_dir).is_file()
+}
+
+/// Speak primary enablement: non-empty text, not loading, neutral ref present.
+pub fn can_speak_now(text_nonempty: bool, tts_loading: bool, neutral_present: bool) -> bool {
+    text_nonempty && !tts_loading && neutral_present
+}
+
+/// Loud guidance when Eve neutral is missing (install path).
+pub fn voice_missing_guidance(neutral_present: bool) -> Option<&'static str> {
+    if neutral_present {
+        None
+    } else {
+        Some(
+            "Missing eve_neutral.wav — run scripts/install_voices.sh (set YAPPER_VOICES_DIR).",
+        )
+    }
+}
+
 /// Chunk temp files safe to delete after Stop; keep `last_success` for Replay.
 pub fn chunk_paths_to_remove(
     chunk_paths: &[PathBuf],

@@ -11,6 +11,7 @@ from yapper_tts.tones import (
     DEFAULT_TONES,
     list_tone_names,
     load_knobs,
+    neutral_voice_present,
     resolve_tone,
 )
 
@@ -70,3 +71,14 @@ def test_unknown_tone_raises() -> None:
 def test_default_tones_cover_gold_set() -> None:
     assert "excited" in DEFAULT_TONES
     assert "whisper" in DEFAULT_TONES
+
+
+def test_neutral_voice_present_false_when_missing(tmp_path: Path) -> None:
+    assert not neutral_voice_present(tmp_path)
+    (tmp_path / "eve_calm.wav").write_bytes(b"RIFF")
+    assert not neutral_voice_present(tmp_path)
+
+
+def test_neutral_voice_present_true_with_file(tmp_path: Path) -> None:
+    (tmp_path / "eve_neutral.wav").write_bytes(b"RIFF....WAVE")
+    assert neutral_voice_present(tmp_path)

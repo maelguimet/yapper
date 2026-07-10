@@ -1,12 +1,11 @@
 //! JobHub message drain and AppMsg handlers.
 
 use super::super::messages::{
-    apply_tts_synth_timeout, is_live_tts_job, should_reload_tts_after_live_synth_failure, AppMsg,
-    SynthTimeoutDisposition, TtsTimeoutUiState,
+    apply_tts_synth_timeout, is_live_stt_job, is_live_tts_job,
+    should_reload_tts_after_live_synth_failure, AppMsg, SynthTimeoutDisposition, TtsTimeoutUiState,
 };
 use super::super::state::{
-    follow_up_after_transcribe, status_after_transcribe_success, RecordingIntent,
-    TranscribeFollowUp,
+    follow_up_after_transcribe, status_after_transcribe_success, TranscribeFollowUp,
 };
 use super::super::YapperApp;
 use crate::policy::Role;
@@ -40,14 +39,14 @@ impl YapperApp {
                         self.stt_loaded = true;
                         self.stt_model_id = Some(model.clone());
                         self.status = format!("STT {model} loaded");
-                        if let Some(path) = self.pending_transcribe.take() {
-                            self.do_transcribe_file(path);
+                        if let Some((path, intent)) = self.pending_transcribe.take() {
+                            self.do_transcribe_file(path, intent);
                         }
                     }
                     Err(e) => {
                         self.status = format!("STT load error: {e}");
                         self.pending_transcribe = None;
-                        self.recording_intent = RecordingIntent::Idle;
+                        self.live_stt_job = None;
                     }
                 }
             }
@@ -80,9 +79,16 @@ impl YapperApp {
                 }
                 Err(e) => self.status = format!("unload error: {e}"),
             },
-            AppMsg::Transcribed { text } => {
-                // Take intent once so a following success cannot re-insert.
-                let intent = std::mem::replace(&mut self.recording_intent, RecordingIntent::Idle);
+            AppMsg::Transcribed {
+                job_id,
+                intent,
+                text,
+            } => {
+                // Job-scoped: ignore stale results from a prior session/job.
+                if !is_live_stt_job(self.live_stt_job, job_id) {
+                    return;
+                }
+                self.live_stt_job = None;
                 self.transcript = text.clone();
                 let follow = follow_up_after_transcribe(intent, &text);
                 if follow == TranscribeFollowUp::InsertAtCursor {
@@ -107,8 +113,15 @@ impl YapperApp {
                 }
                 self.status = status_after_transcribe_success(follow).into();
             }
-            AppMsg::TranscribeFailed { error, path } => {
-                self.recording_intent = RecordingIntent::Idle;
+            AppMsg::TranscribeFailed {
+                job_id,
+                error,
+                path,
+            } => {
+                if !is_live_stt_job(self.live_stt_job, job_id) {
+                    return;
+                }
+                self.live_stt_job = None;
                 self.status = format!("transcribe error: {error} ({})", path.display());
             }
             AppMsg::TtsChunkReady {

@@ -1,0 +1,55 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+"""pytest entry for empty-HOME isolation (Yapper unit tests).
+
+App path tests set HOME to a temp dir so XDG / Eve assets are not visible.
+Stock user-site installs resolve site-packages as $HOME/.local/..., so that
+override hides pytest itself. This entrypoint loads site-packages relative to
+its install prefix (…/bin → …/lib/pythonX.Y/site-packages) when present;
+otherwise falls back to the real user-site under the original home from the
+password database so the runner still starts.
+
+Install (optional, so bare `pytest` on PATH works under empty HOME):
+  install -m 755 scripts/pytest ~/.local/bin/pytest
+
+Or invoke directly:
+  PYTHONPATH=python scripts/pytest -q -m 'not gpu'
+"""
+from __future__ import annotations
+
+import os
+import re
+import sys
+from pathlib import Path
+
+
+def _prepend(path: Path) -> None:
+    if path.is_dir():
+        s = str(path)
+        if s not in sys.path:
+            sys.path.insert(0, s)
+
+
+def _ensure_test_runner_site() -> None:
+    ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    # 1) Relative to this script when installed as ~/.local/bin/pytest
+    bindir = Path(__file__).resolve().parent
+    _prepend(bindir.parent / "lib" / ver / "site-packages")
+    # 2) Same layout one level up (…/local/bin → …/local/lib/…)
+    # 3) Real login home user-site (password DB), ignoring temporary HOME=
+    try:
+        import pwd
+
+        real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:  # noqa: BLE001 — best-effort fallback only
+        real_home = Path(os.environ.get("HOME") or "/")
+    _prepend(real_home / ".local" / "lib" / ver / "site-packages")
+
+
+_ensure_test_runner_site()
+
+from _pytest.config import _console_main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.argv[0] = re.sub(r"(-script\.pyw|\.exe)?$", "", sys.argv[0])
+    raise SystemExit(_console_main())

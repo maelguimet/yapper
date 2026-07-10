@@ -24,6 +24,19 @@ if [[ -d "$CLONE/gold" ]]; then
   count=$(find "$DEST" -name 'eve_*.wav' | wc -l)
   echo "voices ready: $count refs in $DEST"
 else
-  echo "WARN: clone gold not found at $CLONE/gold — TTS will fail until refs are installed" >&2
+  echo "WARN: clone gold not found at $CLONE/gold — cannot install Eve refs" >&2
+  echo "  Set YAPPER_TTS_CLONE to a tree with gold/eve_*.wav, or copy refs into:" >&2
+  echo "  $DEST" >&2
+  echo "  Speak stays disabled until $DEST/eve_neutral.wav exists." >&2
   exit 1
 fi
+
+# Honesty gate: neutral is required for Speak (UI disables without it).
+if [[ ! -f "$DEST/eve_neutral.wav" && ! -L "$DEST/eve_neutral.wav" ]]; then
+  echo "ERROR: eve_neutral.wav missing in $DEST after install" >&2
+  echo "  Speak will stay disabled until that file exists." >&2
+  echo "  Expected source: $CLONE/gold/eve_neutral.wav" >&2
+  exit 1
+fi
+
+echo "eve_neutral: ok ($DEST/eve_neutral.wav)"

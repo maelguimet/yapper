@@ -161,9 +161,10 @@ impl eframe::App for YapperApp {
                                 .add_filter("audio", &["wav", "mp3", "m4a", "flac", "ogg"])
                                 .pick_file()
                             {
-                                self.recording_intent =
-                                    super::state::RecordingIntent::Idle;
-                                self.do_transcribe_file(path);
+                                self.do_transcribe_file(
+                                    path,
+                                    super::messages::RecordingIntent::Idle,
+                                );
                             }
                         }
                         if ui
@@ -181,7 +182,14 @@ impl eframe::App for YapperApp {
                     }
                     MainTab::Speak => {
                         let tts_busy = self.tts_busy();
-                        let can_speak = !self.tts_text.trim().is_empty() && !self.tts_loading;
+                        let voice_ok = crate::ui::neutral_voice_present(std::path::Path::new(
+                            self.cfg.models.voices_dir.trim(),
+                        ));
+                        let can_speak = crate::ui::can_speak_now(
+                            !self.tts_text.trim().is_empty(),
+                            self.tts_loading,
+                            voice_ok,
+                        );
                         let speak_lbl = speak_action_label(tts_busy);
                         let speak = ui.add_enabled(
                             can_speak,
@@ -254,10 +262,13 @@ impl eframe::App for YapperApp {
                         }
                         // Same restart path as Speak: read_aloud/do_speak → start_speak_job
                         // (OOB kill when synth_in_flight). Stay enabled while busy so a new
-                        // selection/file can restart immediately.
+                        // selection/file can restart immediately — but not without Eve neutral.
+                        let can_read_or_file = !self.tts_loading && voice_ok;
                         if ui
-                            .add_enabled(!self.tts_loading, egui::Button::new("Read selection"))
-                            .on_hover_text(if tts_busy {
+                            .add_enabled(can_read_or_file, egui::Button::new("Read selection"))
+                            .on_hover_text(if !voice_ok {
+                                "Missing eve_neutral.wav — run scripts/install_voices.sh"
+                            } else if tts_busy {
                                 "Restart: stop current speech and read selection"
                             } else {
                                 "Read primary selection (or clipboard if toggled)"
@@ -267,8 +278,10 @@ impl eframe::App for YapperApp {
                             self.read_aloud();
                         }
                         if ui
-                            .add_enabled(!self.tts_loading, egui::Button::new("Speak file…"))
-                            .on_hover_text(if tts_busy {
+                            .add_enabled(can_read_or_file, egui::Button::new("Speak file…"))
+                            .on_hover_text(if !voice_ok {
+                                "Missing eve_neutral.wav — run scripts/install_voices.sh"
+                            } else if tts_busy {
                                 "Restart: stop current speech and speak file"
                             } else {
                                 "Load a text file and speak it"

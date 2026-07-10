@@ -254,3 +254,36 @@ fn resolve_replay_prefers_durable_last_over_stale_transport() {
     assert_eq!(r, Some(good));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn missing_eve_neutral_disables_speak_and_guides_install() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let empty = std::env::temp_dir().join(format!("yapper-voices-empty-{nanos}"));
+    std::fs::create_dir_all(&empty).unwrap();
+    assert!(!neutral_voice_present(&empty));
+    assert!(!can_speak_now(true, false, false));
+    let guide = voice_missing_guidance(false).unwrap();
+    let g = guide.to_ascii_lowercase();
+    assert!(g.contains("eve_neutral") || g.contains("neutral"), "{guide}");
+    assert!(
+        g.contains("install") || g.contains("voices") || g.contains("yapper_voices"),
+        "{guide}"
+    );
+    assert_eq!(voice_missing_guidance(true), None);
+    assert!(can_speak_now(true, false, true));
+    assert!(!can_speak_now(false, false, true));
+    assert!(!can_speak_now(true, true, true));
+
+    let present = std::env::temp_dir().join(format!("yapper-voices-ok-{nanos}"));
+    std::fs::create_dir_all(&present).unwrap();
+    let wav = neutral_ref_wav(&present);
+    std::fs::write(&wav, b"RIFF....WAVE").unwrap();
+    assert!(neutral_voice_present(&present));
+    assert!(can_speak_now(true, false, true));
+    let _ = std::fs::remove_dir_all(&empty);
+    let _ = std::fs::remove_dir_all(&present);
+}

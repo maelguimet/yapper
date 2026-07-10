@@ -190,9 +190,15 @@ fn handle_cmd(
             let _ = msg_tx.send(AppMsg::Unloaded { role: None, result });
             push_status(workers, msg_tx);
         }
-        JobCmd::Transcribe { path, language } => {
+        JobCmd::Transcribe {
+            job_id,
+            intent,
+            path,
+            language,
+        } => {
             if !workers.stt_loaded() {
                 let _ = msg_tx.send(AppMsg::TranscribeFailed {
+                    job_id,
                     error: "STT not loaded".into(),
                     path,
                 });
@@ -201,7 +207,11 @@ fn handle_cmd(
             sync_live_pids(workers, live);
             match workers.transcribe(&path, &language) {
                 Ok(text) => {
-                    let _ = msg_tx.send(AppMsg::Transcribed { text });
+                    let _ = msg_tx.send(AppMsg::Transcribed {
+                        job_id,
+                        intent,
+                        text,
+                    });
                 }
                 Err(e) => {
                     let err = format!("{e:#}");
@@ -211,11 +221,15 @@ fn handle_cmd(
                             role: Role::Stt,
                             op: "transcribe".into(),
                             error: err.clone(),
-                            job_id: None,
+                            job_id: Some(job_id),
                         });
                     }
                     push_status(workers, msg_tx);
-                    let _ = msg_tx.send(AppMsg::TranscribeFailed { error: err, path });
+                    let _ = msg_tx.send(AppMsg::TranscribeFailed {
+                        job_id,
+                        error: err,
+                        path,
+                    });
                 }
             }
             sync_live_pids(workers, live);

@@ -3,6 +3,33 @@
 use crate::policy::Role;
 use std::path::PathBuf;
 
+/// Why the current (or next completed) mic/file transcribe was started.
+///
+/// GUI Record fills the Transcript panel only; global hold-to-dictate also
+/// pastes at the focused cursor. File pick is always panel-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecordingIntent {
+    /// No insert pending (idle, or file-transcribe).
+    #[default]
+    Idle,
+    /// Manual Dictate Record/Stop — panel + optional clipboard copy, never paste.
+    GuiPanel,
+    /// Global hold-to-dictate hotkey — paste at cursor after successful Transcribed.
+    HotkeyInsert,
+}
+
+impl RecordingIntent {
+    /// Only hotkey PTT requests insert-at-cursor after transcription.
+    pub fn wants_insert_at_cursor(self) -> bool {
+        matches!(self, Self::HotkeyInsert)
+    }
+
+    /// True while a mic session owns the hardware for this intent.
+    pub fn is_open_mic(self) -> bool {
+        matches!(self, Self::GuiPanel | Self::HotkeyInsert)
+    }
+}
+
 /// Commands the UI posts to the background job thread.
 #[derive(Debug, Clone)]
 pub enum JobCmd {
@@ -17,7 +44,10 @@ pub enum JobCmd {
         role: Role,
     },
     UnloadAll,
+    /// Transcribe one audio file. Stale results are filtered by `job_id`.
     Transcribe {
+        job_id: u64,
+        intent: RecordingIntent,
         path: PathBuf,
         language: String,
     },
@@ -54,9 +84,12 @@ pub enum AppMsg {
         result: Result<(), String>,
     },
     Transcribed {
+        job_id: u64,
+        intent: RecordingIntent,
         text: String,
     },
     TranscribeFailed {
+        job_id: u64,
         error: String,
         path: PathBuf,
     },
@@ -72,8 +105,8 @@ pub enum AppMsg {
         index: usize,
         error: String,
     },
-    /// Worker killed or timed out mid-op. TTS synthesize always sets `job_id`
-    /// so Stop/Restart can ignore stale kills; STT leaves it `None`.
+    /// Worker killed or timed out mid-op. Synth and STT set `job_id` when known
+    /// so Stop/Restart and concurrent sessions ignore stale events.
     WorkerTimedOut {
         role: Role,
         op: String,
@@ -96,6 +129,45 @@ pub enum AppMsg {
 /// Pure filter: should the UI accept this TTS chunk for the active job?
 pub fn is_live_tts_job(active_job_id: Option<u64>, msg_job_id: u64) -> bool {
     active_job_id == Some(msg_job_id)
+}
+
+/// Pure filter: should the UI accept this STT result for the live transcribe job?
+pub fn is_live_stt_job(active_job_id: Option<u64>, msg_job_id: u64) -> bool {
+    active_job_id == Some(msg_job_id)
+}
+
+/// True when a recording release matches the open mic session (GUI vs PTT).
+///
+/// Mismatched releases are no-ops so GUI Stop cannot end hotkey PTT and vice versa.
+pub fn release_matches_open_recording(
+    open: RecordingIntent,
+    release: RecordingIntent,
+) -> bool {
+    open.is_open_mic() && open == release
+}
+
+/// Shared Unload-all prep flags (Stop / Hard Quit parity for kill + cleanup).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnloadAllPlan {
+    pub stop_playback: bool,
+    pub cleanup_chunks: bool,
+    pub oob_kill_tts_if_in_flight: bool,
+    pub oob_kill_all_workers: bool,
+    pub send_unload_all: bool,
+}
+
+/// Plan Settings **Unload all** must follow before/with model unload.
+///
+/// Same stop + OOB-kill + cleanup shape as Stop mid-synth and Hard Quit —
+/// never a bare `UnloadAll` enqueue alone while synth/playback is live.
+pub fn plan_unload_all(synth_in_flight: bool) -> UnloadAllPlan {
+    UnloadAllPlan {
+        stop_playback: true,
+        cleanup_chunks: true,
+        oob_kill_tts_if_in_flight: synth_in_flight,
+        oob_kill_all_workers: true,
+        send_unload_all: true,
+    }
 }
 
 /// How the UI should treat a TTS synthesize worker-timeout / kill event.
@@ -302,6 +374,123 @@ mod tests {
         assert_eq!(
             classify_tts_synth_timeout(None, None),
             SynthTimeoutDisposition::SilentCleanup
+        );
+    }
+
+    #[test]
+    fn stt_job_id_and_intent_on_transcribe_messages() {
+        let cmd = JobCmd::Transcribe {
+            job_id: 42,
+            intent: RecordingIntent::HotkeyInsert,
+            path: "/tmp/a.wav".into(),
+            language: "en".into(),
+        };
+        match cmd {
+            JobCmd::Transcribe {
+                job_id,
+                intent,
+                ..
+            } => {
+                assert_eq!(job_id, 42);
+                assert_eq!(intent, RecordingIntent::HotkeyInsert);
+                assert!(intent.wants_insert_at_cursor());
+            }
+            _ => panic!("expected Transcribe"),
+        }
+        let ok = AppMsg::Transcribed {
+            job_id: 42,
+            intent: RecordingIntent::HotkeyInsert,
+            text: "hi".into(),
+        };
+        let fail = AppMsg::TranscribeFailed {
+            job_id: 42,
+            error: "boom".into(),
+            path: "/tmp/a.wav".into(),
+        };
+        match (&ok, &fail) {
+            (
+                AppMsg::Transcribed {
+                    job_id: a,
+                    intent,
+                    ..
+                },
+                AppMsg::TranscribeFailed { job_id: b, .. },
+            ) => {
+                assert_eq!(*a, *b);
+                assert_eq!(*intent, RecordingIntent::HotkeyInsert);
+            }
+            _ => panic!("shape"),
+        }
+    }
+
+    #[test]
+    fn stale_stt_job_id_is_ignored() {
+        assert!(!is_live_stt_job(Some(2), 1));
+        assert!(!is_live_stt_job(None, 1));
+        assert!(is_live_stt_job(Some(3), 3));
+    }
+
+    /// Applying a non-live STT result must not clear or drive the live session.
+    #[test]
+    fn non_live_stt_result_does_not_apply_follow_up() {
+        let live = Some(9u64);
+        let stale_ok = AppMsg::Transcribed {
+            job_id: 8,
+            intent: RecordingIntent::HotkeyInsert,
+            text: "should not paste".into(),
+        };
+        match stale_ok {
+            AppMsg::Transcribed { job_id, intent, text } => {
+                assert!(!is_live_stt_job(live, job_id));
+                // Live session remains HotkeyInsert-owned; stale message ignored.
+                let _ = (intent, text);
+                assert_eq!(live, Some(9));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn mismatched_recording_release_is_noop() {
+        assert!(!release_matches_open_recording(
+            RecordingIntent::GuiPanel,
+            RecordingIntent::HotkeyInsert
+        ));
+        assert!(!release_matches_open_recording(
+            RecordingIntent::HotkeyInsert,
+            RecordingIntent::GuiPanel
+        ));
+        assert!(!release_matches_open_recording(
+            RecordingIntent::Idle,
+            RecordingIntent::GuiPanel
+        ));
+        assert!(release_matches_open_recording(
+            RecordingIntent::GuiPanel,
+            RecordingIntent::GuiPanel
+        ));
+        assert!(release_matches_open_recording(
+            RecordingIntent::HotkeyInsert,
+            RecordingIntent::HotkeyInsert
+        ));
+    }
+
+    #[test]
+    fn unload_all_plan_matches_stop_hard_quit_hooks() {
+        let idle = plan_unload_all(false);
+        assert!(idle.stop_playback);
+        assert!(idle.cleanup_chunks);
+        assert!(!idle.oob_kill_tts_if_in_flight);
+        assert!(idle.oob_kill_all_workers);
+        assert!(idle.send_unload_all);
+
+        let busy = plan_unload_all(true);
+        assert!(busy.oob_kill_tts_if_in_flight);
+        assert!(busy.oob_kill_all_workers);
+        assert!(busy.send_unload_all);
+        // Same OOB condition as Speak restart / Stop mid-synth.
+        assert_eq!(
+            busy.oob_kill_tts_if_in_flight,
+            crate::ui::speak_restart_needs_oob_kill(true)
         );
     }
 }
