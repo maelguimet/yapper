@@ -111,9 +111,10 @@ impl YapperApp {
 
     pub(crate) fn ui_tab_speak(&mut self, ui: &mut egui::Ui) {
         let text_empty = self.tts_text.trim().is_empty();
-        let voice_ok = crate::ui::neutral_voice_present(std::path::Path::new(
-            self.cfg.models.voices_dir.trim(),
-        ));
+        let voice_ok = crate::ui::neutral_voice_present(
+            std::path::Path::new(self.cfg.models.voices_dir.trim()),
+            &self.cfg.tts.voice,
+        );
         if let Some(guide) = crate::ui::voice_missing_guidance(voice_ok) {
             ui.colored_label(egui::Color32::from_rgb(255, 180, 80), guide);
             ui.add_space(4.0);

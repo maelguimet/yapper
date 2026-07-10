@@ -92,9 +92,9 @@ impl YapperApp {
             return;
         }
         let voices = std::path::Path::new(self.cfg.models.voices_dir.trim());
-        if !crate::ui::neutral_voice_present(voices) {
+        if !crate::ui::neutral_voice_present(voices, &self.cfg.tts.voice) {
             self.status = crate::ui::voice_missing_guidance(false)
-                .unwrap_or("missing eve_neutral.wav")
+                .unwrap_or("missing neutral voice reference")
                 .into();
             return;
         }

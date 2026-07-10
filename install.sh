@@ -206,7 +206,7 @@ setup_python() {
 }
 
 install_voices() {
-  log "installing Eve voice refs"
+  log "installing default voice references"
   if [[ "$DRY_RUN" == "1" ]]; then
     log "[dry-run] scripts/install_voices.sh → $DATA/voices (YAPPER_VOICES_DIR)"
     return

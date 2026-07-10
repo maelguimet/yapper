@@ -1,4 +1,4 @@
-"""Eve tone list + knobs from installed voices dir or tts/clone sources."""
+"""Tone list + knobs from installed voices dir or optional dev clone sources."""
 
 from __future__ import annotations
 
@@ -68,11 +68,22 @@ def clone_source_dir() -> Path | None:
     return None
 
 
+DEFAULT_VOICE = "default"
+
+
+def _voice_prefix(voice: str) -> str:
+    v = (voice or DEFAULT_VOICE).strip().lower()
+    return v if v else DEFAULT_VOICE
+
+
 def resolve_voices_root() -> Path:
     """Prefer installed voices; fall back to clone gold for dev."""
     installed = voices_dir()
-    if (installed / "knobs.json").is_file() or any(installed.glob("eve_*.wav")):
+    if (installed / "knobs.json").is_file():
         return installed
+    for pattern in ("default_*.wav", "eve_*.wav"):
+        if any(installed.glob(pattern)):
+            return installed
     clone = clone_source_dir()
     if clone is not None:
         gold = clone / "gold"
@@ -107,41 +118,67 @@ def load_knobs(voices_root: Path | None = None) -> dict[str, dict[str, float]]:
     return merged
 
 
-def list_tone_names(voices_root: Path | None = None) -> list[str]:
+def list_tone_names(voices_root: Path | None = None, voice: str = DEFAULT_VOICE) -> list[str]:
     root = voices_root or resolve_voices_root()
+    prefix = _voice_prefix(voice)
     found = sorted(
-        p.stem.removeprefix("eve_")
-        for p in root.glob("eve_*.wav")
+        p.stem.removeprefix(f"{prefix}_")
+        for p in root.glob(f"{prefix}_*.wav")
         if p.is_file()
     )
+    if not found:
+        found = sorted(
+            p.stem.removeprefix("eve_")
+            for p in root.glob("eve_*.wav")
+            if p.is_file()
+        )
     if found:
         return found
     return list(DEFAULT_TONES)
 
 
-def neutral_voice_present(voices_root: Path | None = None) -> bool:
-    """True when eve_neutral.wav exists under the resolved voices root."""
+def neutral_voice_present(
+    voices_root: Path | None = None, voice: str = DEFAULT_VOICE
+) -> bool:
+    """True when `{voice}_neutral.wav` exists (or legacy eve_neutral.wav)."""
     root = voices_root if voices_root is not None else resolve_voices_root()
+    prefix = _voice_prefix(voice)
+    if (root / f"{prefix}_neutral.wav").is_file():
+        return True
     return (root / "eve_neutral.wav").is_file()
 
 
-def resolve_tone(name: str, voices_root: Path | None = None, voice: str = "eve") -> ToneSpec:
+def resolve_tone(
+    name: str, voices_root: Path | None = None, voice: str = DEFAULT_VOICE
+) -> ToneSpec:
     root = voices_root or resolve_voices_root()
     tone = (name or "neutral").strip().lower()
+    prefix = _voice_prefix(voice)
     knobs = load_knobs(root)
     if tone not in knobs and tone not in DEFAULT_TONES:
         raise KeyError(f"unknown tone: {tone!r}")
-    ref = root / f"{voice}_{tone}.wav"
+    ref = root / f"{prefix}_{tone}.wav"
     if not ref.is_file():
-        # try gold path under clone when voices root is gold already handled;
-        # also try prompts/
+        legacy = root / f"eve_{tone}.wav"
+        if legacy.is_file():
+            ref = legacy
+    if not ref.is_file():
         clone = clone_source_dir()
         if clone is not None:
             for sub in ("gold", "prompts"):
-                alt = clone / sub / f"{voice}_{tone}.wav"
-                if alt.is_file():
-                    ref = alt
+                for stem in (f"{prefix}_{tone}", f"eve_{tone}"):
+                    alt = clone / sub / f"{stem}.wav"
+                    if alt.is_file():
+                        ref = alt
+                        break
+                if ref.is_file():
                     break
+    if not ref.is_file():
+        neutral = root / f"{prefix}_neutral.wav"
+        if neutral.is_file():
+            ref = neutral
+        elif (root / "eve_neutral.wav").is_file():
+            ref = root / "eve_neutral.wav"
     if not ref.is_file():
         raise FileNotFoundError(f"missing reference wav for tone {tone}: {ref}")
     k = knobs.get(tone, DEFAULT_KNOBS.get(tone, {"exg": 0.5, "cfg": 0.5, "rate": 1.0}))

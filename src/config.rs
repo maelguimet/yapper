@@ -85,7 +85,7 @@ impl Default for Config {
                 model: "chatterbox-multilingual".into(),
                 language: "auto".into(),
                 tone: "neutral".into(),
-                voice: "eve".into(),
+                voice: "default".into(),
             },
             read_aloud: ReadAloudConfig {
                 source: "selection".into(),

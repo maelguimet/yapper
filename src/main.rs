@@ -190,12 +190,14 @@ fn run_doctor() -> anyhow::Result<()> {
         "  voice refs: {n_voices} wav(s) in {}",
         voices_root.display()
     );
-    let neutral = crate::ui::neutral_ref_wav(&voices_root);
-    if crate::ui::neutral_voice_present(&voices_root) {
-        println!("  eve_neutral: ok ({})", neutral.display());
+    let voice = cfg.tts.voice.trim();
+    let voice = if voice.is_empty() { "default" } else { voice };
+    let neutral = crate::ui::neutral_ref_wav(&voices_root, voice);
+    if crate::ui::neutral_voice_present(&voices_root, voice) {
+        println!("  neutral ref: ok ({})", neutral.display());
     } else {
         println!(
-            "  eve_neutral: MISSING — Speak disabled until scripts/install_voices.sh (YAPPER_VOICES_DIR={})",
+            "  neutral ref: MISSING — Speak disabled until scripts/install_voices.sh (YAPPER_VOICES_DIR={})",
             voices_root.display()
         );
     }

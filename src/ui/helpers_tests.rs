@@ -264,11 +264,11 @@ fn missing_eve_neutral_disables_speak_and_guides_install() {
         .as_nanos();
     let empty = std::env::temp_dir().join(format!("yapper-voices-empty-{nanos}"));
     std::fs::create_dir_all(&empty).unwrap();
-    assert!(!neutral_voice_present(&empty));
+    assert!(!neutral_voice_present(&empty, "default"));
     assert!(!can_speak_now(true, false, false));
     let guide = voice_missing_guidance(false).unwrap();
     let g = guide.to_ascii_lowercase();
-    assert!(g.contains("eve_neutral") || g.contains("neutral"), "{guide}");
+    assert!(g.contains("neutral"), "{guide}");
     assert!(
         g.contains("install") || g.contains("voices") || g.contains("yapper_voices"),
         "{guide}"
@@ -280,9 +280,9 @@ fn missing_eve_neutral_disables_speak_and_guides_install() {
 
     let present = std::env::temp_dir().join(format!("yapper-voices-ok-{nanos}"));
     std::fs::create_dir_all(&present).unwrap();
-    let wav = neutral_ref_wav(&present);
+    let wav = neutral_ref_wav(&present, "default");
     std::fs::write(&wav, b"RIFF....WAVE").unwrap();
-    assert!(neutral_voice_present(&present));
+    assert!(neutral_voice_present(&present, "default"));
     assert!(can_speak_now(true, false, true));
     let _ = std::fs::remove_dir_all(&empty);
     let _ = std::fs::remove_dir_all(&present);

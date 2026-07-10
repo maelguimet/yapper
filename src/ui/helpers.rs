@@ -186,17 +186,22 @@ pub fn tts_guidance_is_warning(_tts_loaded: bool, text_empty: bool) -> bool {
     false
 }
 
-/// Path to the required Eve neutral reference under a voices root.
-pub fn neutral_ref_wav(voices_dir: &std::path::Path) -> std::path::PathBuf {
-    voices_dir.join("eve_neutral.wav")
+/// Path to the required neutral reference under a voices root (`{voice}_neutral.wav`).
+pub fn neutral_ref_wav(voices_dir: &std::path::Path, voice: &str) -> std::path::PathBuf {
+    let id = voice.trim();
+    let id = if id.is_empty() { "default" } else { id };
+    voices_dir.join(format!("{id}_neutral.wav"))
 }
 
-/// True when `eve_neutral.wav` exists at the configured voices root.
-pub fn neutral_voice_present(voices_dir: &std::path::Path) -> bool {
+/// True when `{voice}_neutral.wav` exists (or legacy `eve_neutral.wav` for older installs).
+pub fn neutral_voice_present(voices_dir: &std::path::Path, voice: &str) -> bool {
     if voices_dir.as_os_str().is_empty() {
         return false;
     }
-    neutral_ref_wav(voices_dir).is_file()
+    if neutral_ref_wav(voices_dir, voice).is_file() {
+        return true;
+    }
+    voices_dir.join("eve_neutral.wav").is_file()
 }
 
 /// Speak primary enablement: non-empty text, not loading, neutral ref present.
@@ -210,7 +215,7 @@ pub fn voice_missing_guidance(neutral_present: bool) -> Option<&'static str> {
         None
     } else {
         Some(
-            "Missing eve_neutral.wav — run scripts/install_voices.sh (set YAPPER_VOICES_DIR).",
+            "Missing neutral voice reference — run scripts/install_voices.sh (set YAPPER_VOICES_DIR).",
         )
     }
 }

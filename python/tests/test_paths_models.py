@@ -76,8 +76,8 @@ def test_tts_worker_list_tones_uses_configured_voices_root(
     """TTS tone listing follows YAPPER_VOICES_DIR when voices_root is unset."""
     voices = tmp_path / "cfg_voices"
     voices.mkdir()
-    (voices / "eve_neutral.wav").write_bytes(b"RIFF....WAVE")
-    (voices / "eve_calm.wav").write_bytes(b"RIFF....WAVE")
+    (voices / "default_neutral.wav").write_bytes(b"RIFF....WAVE")
+    (voices / "default_calm.wav").write_bytes(b"RIFF....WAVE")
     monkeypatch.setenv("YAPPER_VOICES_DIR", str(voices))
     # Avoid accidental clone-gold pollution when installed dir is empty — ours has wavs.
     monkeypatch.delenv("YAPPER_TTS_CLONE", raising=False)
@@ -96,7 +96,7 @@ def test_tts_resolve_tone_uses_configured_voices_root(
 
     voices = tmp_path / "cfg_voices"
     voices.mkdir()
-    (voices / "eve_neutral.wav").write_bytes(b"RIFF....WAVE")
+    (voices / "default_neutral.wav").write_bytes(b"RIFF....WAVE")
     (voices / "knobs.json").write_text(
         json.dumps({"neutral": {"exg": 0.42, "cfg": 0.5, "rate": 1.0}}),
         encoding="utf-8",
@@ -106,7 +106,7 @@ def test_tts_resolve_tone_uses_configured_voices_root(
 
     tone = resolve_tone("neutral")  # no voices_root → paths.voices_dir()
     assert tone.ref_wav.is_file()
-    assert tone.ref_wav.name == "eve_neutral.wav"
+    assert tone.ref_wav.name == "default_neutral.wav"
     assert tone.ref_wav.parent.resolve() == voices.resolve()
     assert tone.exaggeration == pytest.approx(0.42)
 

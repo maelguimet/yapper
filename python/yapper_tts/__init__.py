@@ -1,3 +1,3 @@
-"""Yapper TTS worker (Chatterbox multilingual + Eve tones)."""
+"""Yapper TTS worker (Chatterbox multilingual + tone references)."""
 
 __version__ = "0.1.0"
