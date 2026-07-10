@@ -29,6 +29,7 @@ impl eframe::App for YapperApp {
         self.poll_hotkey_capture(ctx);
         self.poll_hotkeys();
         self.poll_tray(ctx);
+        self.poll_tts_api();
         self.poll_record_level();
         self.drain_job_messages();
         self.poll_transport();

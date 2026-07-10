@@ -9,6 +9,7 @@ mod state;
 mod frame;
 mod tabs;
 mod tts_controller;
+mod tts_api;
 
 pub use state::YapperApp;
 
@@ -152,6 +153,10 @@ pub(crate) fn parse_start_tab_env() -> Option<MainTab> {
 }
 
 pub fn run_gui() -> Result<()> {
+    match tts_api::start() {
+        Ok(path) => eprintln!("Yapper TTS API: {}", path.display()),
+        Err(error) => eprintln!("Yapper TTS API unavailable: {error:#}"),
+    }
     let (w, h) = parse_window_size_env().unwrap_or((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT));
     // YAPPER_WINDOW_TITLE isolates screenshot smokes from a leftover maximized window.
     let title = std::env::var("YAPPER_WINDOW_TITLE").unwrap_or_else(|_| "Yapper".into());
