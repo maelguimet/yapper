@@ -11,7 +11,7 @@ Whisper (STT) + Chatterbox multilingual (TTS). No cloud STT/TTS APIs.
 - GUI tabs: **Dictate**, **Speak**, **Settings** (dark theme, status chips + cards)
 - Load / unload models (free VRAM **and** RAM when unloaded)
 - Model selectors (Whisper small/medium; Chatterbox multilingual)
-- Eve voice + tone picker (from `tts/clone` gold + knobs)
+- **Default voice** + tone picker (Chatterbox reference WAVs + emotion knobs; see `assets/voices/ATTRIBUTION.md`)
 - **Streaming / chunked TTS**: long text is split into sentences; first audio starts after the first segment
 - **Playback transport**: Play / Pause / Resume / Stop / Replay, progress scrubber, volume (mpv IPC; falls back to ffplay/paplay)
 - Global hotkeys (rebindable; Capture picker + Apply):
@@ -66,10 +66,11 @@ sudo apt install -y \
 # GNOME tray: gnome-shell-extension-appindicator (often preinstalled on Pop/Ubuntu)
 ```
 
-### Optional assets
+### Voice references (Chatterbox)
 
-- Existing Eve voice bank at `~/projects/tts/clone` (installer copies/symlinks tones)
-- Extra VRAM headroom (RTX 4070 12 GB class is fine if you unload when using other GPU apps)
+Install creates a **default neutral reference** (Piper `ljspeech` — public-domain dataset; see `assets/voices/ATTRIBUTION.md`). Optional `YAPPER_TTS_CLONE` is for **local dev only** (do not redistribute proprietary WAVs).
+
+- Extra VRAM headroom (12 GB class GPU is comfortable if you unload when using other GPU apps)
 - Whisper **medium** (~1.5 GiB) — not downloaded by default; see install flags below
 
 ### Always-on tray (required for ship UX)
@@ -206,13 +207,17 @@ Long text is split into sentences (EN/FR-aware, abbreviation-safe) and synthesiz
 
 Read-aloud hotkey uses the same streaming path.
 
+## Local TTS API
+
+While `yapper gui` is running, agents and scripts on the **same user session** can queue speech via a Unix socket (not TCP). See `docs/tts-api.md` and `docs/agent-tts-tool.md`. Client: `scripts/yapper-tts speak "Hello"`.
+
 ## Config & data
 
 | Path | Purpose |
 |------|---------|
 | `~/.config/yapper/config.toml` | Settings, hotkeys, mic source, model/voice dirs |
 | `~/.local/share/yapper/models/` | Default Whisper weights (`[models] dir`) |
-| `~/.local/share/yapper/voices/` | Default Eve tone refs (`[models] voices_dir`) |
+| `~/.local/share/yapper/voices/` | Chatterbox reference WAVs (`default_*.wav`, optional `knobs.json`) |
 | `~/.local/share/yapper/venv/` | Installer Python env |
 | `~/.local/share/yapper/logs/` | Logs |
 
@@ -223,7 +228,7 @@ Read-aloud hotkey uses the same streaming path.
 ```toml
 [models]
 dir = "/home/you/.local/share/yapper/models"       # Whisper under <dir>/whisper/
-voices_dir = "/home/you/.local/share/yapper/voices"  # Eve eve_*.wav + knobs.json
+voices_dir = "/home/you/.local/share/yapper/voices"  # e.g. default_neutral.wav + knobs.json
 ```
 
 The shell injects these as `YAPPER_MODELS_DIR` and `YAPPER_VOICES_DIR` when spawning
@@ -275,6 +280,11 @@ yapper/
   docs/
 ```
 
+## Contributing & security
+
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [SECURITY.md](SECURITY.md)
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

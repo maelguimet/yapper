@@ -1,50 +1,26 @@
-# Reuse map (this machine)
+# Public reuse map (open source)
 
-Quick pointers for implementers. Prefer **copying ideas and small helpers**, not hard-coding absolute paths into the shipped product (installer may *discover* these paths on the dev machine).
+Yapper does **not** ship proprietary voice banks or model weights in git.
 
-## Eve tones
+## Default Chatterbox reference audio
 
-```
-/home/maelguimet/projects/tts/clone/gold/eve_*.wav   # preferred refs
-/home/maelguimet/projects/tts/clone/prompts/eve_*.wav
-/home/maelguimet/projects/tts/clone/knobs.json       # exg, cfg, rate
-/home/maelguimet/projects/tts/scripts/emotion_map.py # names + descriptions
-```
+| What | Where |
+|------|--------|
+| Install script | `scripts/install_voices.sh` |
+| Piper-generated neutral ref | `scripts/generate_default_reference.sh` |
+| Attribution | `assets/voices/ATTRIBUTION.md` |
+| Runtime layout | `$YAPPER_VOICES_DIR` or `~/.local/share/yapper/voices/` |
 
-Tones present: neutral, calm, caring, confused, excited, sad, angry, serious,
-sensual, teasing, conspiratorial, motivational, romantic, unhinged, whisper.
+Files use the pattern `{voice}_{tone}.wav` (default voice id: `default`). A single `default_neutral.wav` is enough for all tones (emotion knobs in code / optional `knobs.json`).
 
-## Chatterbox
+## Chatterbox + Whisper weights
 
-```
-# Multilingual class
-~/.local/lib/python3.10/site-packages/chatterbox/mtl_tts.py
-  ChatterboxMultilingualTTS
-  SUPPORTED_LANGUAGES: en, fr, ...
+Downloaded at runtime into `YAPPER_MODELS_DIR` (see `scripts/download_models.py`). Chatterbox pulls from Hugging Face on first TTS load.
 
-# Working venv (reference only)
-~/projects/grok-chat/aidra/services/tts/venv
+## Optional dev-only clone tree
 
-# Load/unload + CUDA patterns
-~/projects/supergemma-assistant/services/tts_server.py
+`YAPPER_TTS_CLONE` may point at a **private** local tree for development. Never commit or redistribute those WAVs.
 
-# HF cache (~3G)
-~/.cache/huggingface/hub/models--ResembleAI--chatterbox
-```
+## Tone names
 
-## Whisper
-
-```
-~/.local/bin/whisper
-~/.local/lib/python3.10/site-packages/whisper/
-/mnt/lexar-ai/model-tools/whisper-cache/base.pt   # only base today
-```
-
-Yapper should download **small** + **medium** into `~/.local/share/yapper/models`.
-
-## X11 / tray on this host
-
-- Session: X11, Pop GNOME
-- `xclip`, `xdotool` installed
-- Ayatana AppIndicator + GNOME appindicators extension
-- pkg-config: `gtk+-3.0`, `ayatana-appindicator3-0.1` (not gtk4.pc)
+Canonical list: `python/yapper_tts/tones.py` (`DEFAULT_TONES`).

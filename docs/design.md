@@ -60,7 +60,7 @@ Typed Python process.
 - Model: `ChatterboxMultilingualTTS`
 - Inputs: text, `language_id` (`en`/`fr`/…), tone name → reference wav + knobs
 - Output: audio path or bytes (WAV preferred internally; optional mp3 via ffmpeg)
-- Default voice identity: **Eve** (`eve_<tone>.wav` from gold bank)
+- Default voice identity: **`default`** (`default_<tone>.wav`; install generates `default_neutral.wav` via Piper — see `assets/voices/ATTRIBUTION.md`)
 - Fully exits on unload
 
 ## Tone system
@@ -70,8 +70,8 @@ Source of truth for v1:
 | Piece | Source |
 |-------|--------|
 | Tone names | `emotion_map.EMOTIONS` keys / gold filenames |
-| Reference audio | `tts/clone/gold/eve_<tone>.wav` (preferred) or `prompts/` |
-| Knobs | `tts/clone/knobs.json` → exaggeration, cfg_weight, optional rate |
+| Reference audio | `{voice}_<tone>.wav` under voices dir; `default_neutral.wav` required for Speak |
+| Knobs | optional `knobs.json` → exaggeration, cfg_weight, rate (defaults in code) |
 
 GUI shows human-readable tone list (Neutral, Calm, Excited, …). Changing tone only changes ref+knobs for the next synth; no LLM director.
 
@@ -162,7 +162,7 @@ shared by workers, `download_models.py`, `install_voices.sh`, and `yapper doctor
 1. Detect OS / X11 / nvidia-smi / rustc / python3
 2. Build `cargo build --release`
 3. Create venv, install python deps
-4. Copy/symlink Eve voices + knobs
+4. Install default voice references (`scripts/install_voices.sh`)
 5. Optionally download whisper small/medium into models dir
 6. Install binary to `~/.local/bin/yapper`
 7. Write `.desktop` file

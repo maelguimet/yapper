@@ -2,7 +2,7 @@
 
 Local tray app for **STT + TTS** on Linux (no cloud APIs). Hybrid: **Rust** shell (GUI/tray/hotkeys) + **typed Python** workers (Whisper + Chatterbox).
 
-**Repo:** `/home/maelguimet/projects/yapper`  
+**Repo:** clone anywhere (e.g. `~/projects/yapper`)
 **After `/clear`:** read this file, then `TODO.md`, then `docs/design.md`.
 
 ---
@@ -17,9 +17,9 @@ Local tray app for **STT + TTS** on Linux (no cloud APIs). Hybrid: **Rust** shel
 | 4 | **STT sizes:** Whisper **small** and **medium**, selectable in GUI. |
 | 5 | **Hold-to-talk** for dictation. Always insert at cursor; **also copy to clipboard** with a GUI toggle. |
 | 6 | **Read-aloud default = primary selection** (highlighted text). Toggle for “read clipboard”. |
-| 7 | **Default voice = Eve** refs from `~/projects/tts/clone/`. GUI tone picker from gold/prompts + knobs. |
+| 7 | **Default voice `default`** — install `default_neutral.wav` (Piper ljspeech ref). Tone picker + knobs. Optional `YAPPER_TTS_CLONE` for private dev only. |
 | 8 | Models under `~/.local/share/yapper/models`. **Unload frees RAM+VRAM** (kill/drop worker). Both loaded if they fit; if not, **keep the most recently used**, unload the other. |
-| 9 | v1 targets: **Pop/Ubuntu-class GNOME, X11, AppIndicator, NVIDIA CUDA**. Wayland later. |
+| 9 | v1 targets: **GNOME-class Linux, X11, AppIndicator, NVIDIA CUDA recommended**. Wayland later. |
 | 10 | Project path: **`~/projects/yapper`**. |
 | 11 | v1 = tray + GUI + hotkeys + installer + README. No director, no Wayland. |
 | 12 | **Always-on tray.** Window close/minimize **hides to top-bar tray**; process + hotkeys stay alive. **Quit only** via tray right-click → Quit (or explicit Exit). No tray icon = broken. |
@@ -42,7 +42,7 @@ Local tray app for **STT + TTS** on Linux (no cloud APIs). Hybrid: **Rust** shel
      ┌──────────▼──────────┐  ┌───────▼──────────────┐
      │ yapper-stt (Python) │  │ yapper-tts (Python)  │
      │ openai-whisper or   │  │ ChatterboxMultilingual│
-     │ whisper.cpp wrap    │  │ + Eve ref + tone knobs│
+     │ whisper.cpp wrap    │  │ + ref wav + tone knobs│
      │ small | medium      │  │ en | fr language_id   │
      └─────────────────────┘  └──────────────────────┘
 ```
@@ -50,7 +50,7 @@ Local tray app for **STT + TTS** on Linux (no cloud APIs). Hybrid: **Rust** shel
 **Prefer:** keep workers **not running** when models are unloaded. Load = start process + load weights; unload = graceful quit + `gc` (process exit frees all memory).
 
 ### VRAM policy
-- RTX 4070 = **12 GB**. Other apps (Ollama/Comfy) may compete.
+- Typical desktop GPU **8–12 GB**. Other apps may compete.
 - Allow STT + TTS both loaded **if free VRAM allows**.
 - If load would fail / not fit: unload the **least recently used** of the other role, retry.
 - “Unload all” button for full free.
@@ -60,27 +60,16 @@ Local tray app for **STT + TTS** on Linux (no cloud APIs). Hybrid: **Rust** shel
 |------|--------|
 | Config | `~/.config/yapper/config.toml` |
 | Models | `~/.local/share/yapper/models/` |
-| Voices (Eve copies or symlinks) | `~/.local/share/yapper/voices/` |
+| Voices (reference WAVs) | `~/.local/share/yapper/voices/` |
 | Logs | `~/.local/share/yapper/logs/` |
 | Autostart (user) | `~/.config/autostart/yapper.desktop` |
 | Systemd user unit (optional) | `~/.config/systemd/user/yapper.service` |
 
 ---
 
-## Reuse on this machine (do not reinvent)
+## Assets & reuse
 
-| Asset | Path | Use |
-|-------|------|-----|
-| Eve gold tones | `/home/maelguimet/projects/tts/clone/gold/eve_*.wav` | Tone reference audio |
-| Eve prompts (alt refs) | `.../tts/clone/prompts/eve_*.wav` | Fallback refs |
-| Tuned knobs | `.../tts/clone/knobs.json` | exaggeration / cfg / rate per tone |
-| Emotion names + defaults | `.../tts/scripts/emotion_map.py` | Tone list + descriptions |
-| Chatterbox load/unload patterns | `.../supergemma-assistant/services/tts_server.py` | `_load_model`, `_move_model`, CUDA free |
-| Working Chatterbox venv | `.../grok-chat/aidra/services/tts/venv` | Reference env; **prefer app-local venv** |
-| System chatterbox | `~/.local/lib/python3.10/site-packages/chatterbox` | Has `mtl_tts.py` |
-| Whisper CLI (openai) | `~/.local/bin/whisper` | Already installed; only `base.pt` cached today |
-| Whisper cache (shared) | `/mnt/lexar-ai/model-tools/whisper-cache` | Has `base.pt` only — **download small+medium into app models dir** |
-| Hermes STT wrapper (ref) | `.../aiuser-migration/generated/bin/hermes-local-whisper-stt` | CLI shape only |
+See **`docs/reuse-map.md`** for voice install, model paths, and tone lists. Do not commit weights or proprietary WAVs.
 
 **Do not** depend on the full `narrate` pipeline (Ollama director). Ship simple TTS only.
 
@@ -105,7 +94,7 @@ HF weights live under `~/.cache/huggingface/hub/models--ResembleAI--chatterbox` 
   - TTS from **text file**
   - **Load / Unload** STT and TTS (separate + unload all)
   - **Model selectors:** STT = small | medium; TTS = multilingual Chatterbox (slot for future swaps)
-  - **Tone picker** (Eve emotions from gold)
+  - **Tone picker** (named emotions + knobs)
   - **Language** for TTS: auto / en / fr (and STT language auto/en/fr)
   - Toggles: copy transcript to clipboard on dictation; read clipboard vs selection for read-aloud
   - Hotkey rebind UI (persist to config)
@@ -144,7 +133,7 @@ HF weights live under `~/.cache/huggingface/hub/models--ResembleAI--chatterbox` 
 | GUI | Prefer **egui + tray-icon** *or* **GTK3 + ayatana-appindicator** | This machine has GTK3 + ayatana; gtk4-dev missing. Pick one and stick. |
 | Hotkeys | X11 global grab (e.g. `global-hotkey` crate) or GNOME custom keybindings writing to our IPC | Prefer in-app rebind without requiring GNOME Settings |
 | STT | openai-whisper in Python worker first (already installed stack); optional later whisper.cpp | Defaults: small + medium |
-| TTS | `ChatterboxMultilingualTTS` only for v1 | Eve ref + tone knobs |
+| TTS | `ChatterboxMultilingualTTS` only for v1 | Reference WAV + tone knobs |
 | IPC | JSON lines over stdio or Unix socket | Stable schema in `docs/ipc.md` |
 | Config | TOML | |
 | Packaging | `install.sh` + optional `.deb` later | Avoid snap/flatpak for v1 (CUDA pain) |
