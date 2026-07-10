@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Speak/stop/health via Yapper's local Unix-socket TTS API.
+set -Eeuo pipefail
+
+MAX_CHARS="${YAPPER_TTS_MAX_CHARS:-10000}"
+SOCKET="${YAPPER_TTS_SOCKET:-${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR unset}/yapper/tts-api.sock}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  yapper-tts health
+  yapper-tts speak <text...>
+  yapper-tts stop
+
+Environment:
+  YAPPER_TTS_SOCKET   Unix socket path (default: $XDG_RUNTIME_DIR/yapper/tts-api.sock)
+  YAPPER_TTS_MAX_CHARS  Max spoken characters (default: 10000)
+EOF
+}
+
+die() { printf 'yapper-tts: %s\n' "$*" >&2; exit 1; }
+
+require_socket() {
+  [[ -S "$SOCKET" ]] || die "socket not found (is yapper gui running?): $SOCKET"
+}
+
+curl_api() {
+  local method="$1"
+  local path="$2"
+  local body="${3:-}"
+  if [[ -n "$body" ]]; then
+    curl --silent --show-error --fail-with-body \
+      --unix-socket "$SOCKET" \
+      -X "$method" \
+      -H 'Content-Type: application/json' \
+      -d "$body" \
+      "http://localhost${path}"
+  else
+    curl --silent --show-error --fail-with-body \
+      --unix-socket "$SOCKET" \
+      -X "$method" \
+      "http://localhost${path}"
+  fi
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  health)
+    require_socket
+    curl_api GET /health
+    printf '\n'
+    ;;
+  stop)
+    require_socket
+    curl_api POST /v1/stop
+    printf '\n'
+    ;;
+  speak)
+    shift || die "speak requires text"
+    [[ $# -gt 0 ]] || die "speak requires text"
+    text="$*"
+    n="$(printf '%s' "$text" | wc -m | tr -d ' ')"
+    if [[ "$n" -gt "$MAX_CHARS" ]]; then
+      die "text too long ($n > $MAX_CHARS)"
+    fi
+    require_socket
+    body="$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$text")"
+    curl_api POST /v1/speak "$body"
+    printf '\n'
+    ;;
+  -h|--help|help|'')
+    usage
+    exit 0
+    ;;
+  *)
+    die "unknown command: $cmd (try --help)"
+    ;;
+esac

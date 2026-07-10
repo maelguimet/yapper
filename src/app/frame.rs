@@ -56,7 +56,7 @@ impl eframe::App for YapperApp {
         };
         ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
 
-        // ── Top chrome: brand, status sentence, chips, hide ───────────────
+        // ── Top chrome: brand, status sentence, chips ─────────────────────
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -71,15 +71,6 @@ impl eframe::App for YapperApp {
                         .color(egui::Color32::from_rgb(200, 210, 220))
                         .size(13.5),
                 );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .button("Hide")
-                        .on_hover_text("Hide window; tray Open restores")
-                        .clicked()
-                    {
-                        self.hide_to_tray(ctx);
-                    }
-                });
             });
 
             ui.add_space(4.0);
@@ -182,9 +173,10 @@ impl eframe::App for YapperApp {
                     }
                     MainTab::Speak => {
                         let tts_busy = self.tts_busy();
-                        let voice_ok = crate::ui::neutral_voice_present(std::path::Path::new(
-                            self.cfg.models.voices_dir.trim(),
-                        ));
+                        let voice_ok = crate::ui::neutral_voice_present(
+                            std::path::Path::new(self.cfg.models.voices_dir.trim()),
+                            &self.cfg.tts.voice,
+                        );
                         let can_speak = crate::ui::can_speak_now(
                             !self.tts_text.trim().is_empty(),
                             self.tts_loading,
@@ -267,7 +259,7 @@ impl eframe::App for YapperApp {
                         if ui
                             .add_enabled(can_read_or_file, egui::Button::new("Read selection"))
                             .on_hover_text(if !voice_ok {
-                                "Missing eve_neutral.wav — run scripts/install_voices.sh"
+                                "Missing neutral voice reference — run scripts/install_voices.sh"
                             } else if tts_busy {
                                 "Restart: stop current speech and read selection"
                             } else {
@@ -280,7 +272,7 @@ impl eframe::App for YapperApp {
                         if ui
                             .add_enabled(can_read_or_file, egui::Button::new("Speak file…"))
                             .on_hover_text(if !voice_ok {
-                                "Missing eve_neutral.wav — run scripts/install_voices.sh"
+                                "Missing neutral voice reference — run scripts/install_voices.sh"
                             } else if tts_busy {
                                 "Restart: stop current speech and speak file"
                             } else {

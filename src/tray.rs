@@ -254,7 +254,7 @@ fn try_load_png_icon() -> Option<Icon> {
     // monochrome-friendly icon; if assets/yapper-tray.rgba exists (w h rgba…), load it.
     let candidates = [
         Path::new("assets/yapper-tray.png"),
-        Path::new("/home/maelguimet/projects/yapper/assets/yapper-tray.png"),
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/yapper-tray.png")),
     ];
     // Without an image decoder dep, only accept raw RGBA dump: 8-byte header
     // (width u32 LE, height u32 LE) + RGBA pixels. Written by scripts or tests.

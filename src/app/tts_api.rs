@@ -34,6 +34,7 @@ pub(crate) enum ApiCommand {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpeakBody {
     text: String,
 }
@@ -43,6 +44,8 @@ struct HttpRequest {
     method: String,
     path: String,
     body: Vec<u8>,
+    content_type: Option<String>,
+    content_length: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -61,9 +64,14 @@ impl HttpResponse {
         }
     }
 
-    fn bad_request(message: &str) -> Self {
-        let body = serde_json::json!({"error": message}).to_string();
+    fn bad_request(message: &str, code: &str) -> Self {
+        let body = serde_json::json!({"error": message, "code": code}).to_string();
         Self::json(400, "Bad Request", &body)
+    }
+
+    fn unsupported_media_type(message: &str) -> Self {
+        let body = serde_json::json!({"error": message, "code": "unsupported_media_type"}).to_string();
+        Self::json(415, "Unsupported Media Type", &body)
     }
 }
 
@@ -146,7 +154,7 @@ fn listener_loop(listener: UnixListener, tx: SyncSender<ApiCommand>) {
                 let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
                 let response = match read_request(&mut stream) {
                     Ok(req) => route(req, &tx),
-                    Err(error) => HttpResponse::bad_request(&error.to_string()),
+                    Err(error) => HttpResponse::bad_request(&error.to_string(), "bad_request"),
                 };
                 let _ = write_response(&mut stream, response);
             }
@@ -190,16 +198,32 @@ fn read_request(stream: &mut UnixStream) -> Result<HttpRequest> {
     }
 
     let mut content_length = 0_usize;
+    let mut content_length_headers = 0_u8;
+    let mut content_type: Option<String> = None;
+    let mut transfer_encoding = false;
     for line in lines {
+        if line.is_empty() {
+            continue;
+        }
         let Some((name, value)) = line.split_once(':') else {
             bail!("malformed request header");
         };
-        if name.trim().eq_ignore_ascii_case("content-length") {
-            content_length = value
-                .trim()
-                .parse::<usize>()
-                .context("invalid Content-Length")?;
+        let name = name.trim();
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length_headers += 1;
+            if content_length_headers > 1 {
+                bail!("duplicate Content-Length");
+            }
+            content_length = value.parse::<usize>().context("invalid Content-Length")?;
+        } else if name.eq_ignore_ascii_case("content-type") {
+            content_type = Some(value.to_ascii_lowercase());
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            transfer_encoding = true;
         }
+    }
+    if transfer_encoding {
+        bail!("Transfer-Encoding is not supported");
     }
     if content_length > MAX_BODY_BYTES {
         bail!("request body exceeds {MAX_BODY_BYTES} bytes");
@@ -216,32 +240,89 @@ fn read_request(stream: &mut UnixStream) -> Result<HttpRequest> {
         bytes.extend_from_slice(&chunk[..count]);
     }
     let body = bytes[body_start..body_start + content_length].to_vec();
-    Ok(HttpRequest { method, path, body })
+    Ok(HttpRequest {
+        method,
+        path,
+        body,
+        content_type,
+        content_length,
+    })
 }
 
 fn find_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
+fn sanitize_speak_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.trim().chars() {
+        if matches!(c, '\n' | '\r' | '\t') {
+            out.push(c);
+            continue;
+        }
+        if c.is_control() {
+            continue;
+        }
+        if matches!(c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}') {
+            continue;
+        }
+        if ('\u{202a}'..='\u{202e}').contains(&c) || ('\u{2066}'..='\u{2069}').contains(&c) {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn route(request: HttpRequest, tx: &SyncSender<ApiCommand>) -> HttpResponse {
+    if request.method == "GET" && request.content_length > 0 {
+        return HttpResponse::bad_request("unexpected request body", "bad_request");
+    }
+
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => HttpResponse::json(200, "OK", r#"{"status":"ok"}"#),
         ("POST", "/v1/speak") => {
+            let ct = request
+                .content_type
+                .as_deref()
+                .unwrap_or("");
+            if !ct.starts_with("application/json") {
+                return HttpResponse::unsupported_media_type(
+                    "Content-Type must be application/json",
+                );
+            }
+            if request.content_length == 0 {
+                return HttpResponse::bad_request("Content-Length required", "bad_request");
+            }
             let body: SpeakBody = match serde_json::from_slice(&request.body) {
                 Ok(body) => body,
-                Err(_) => return HttpResponse::bad_request("body must be JSON with a text field"),
+                Err(_) => {
+                    return HttpResponse::bad_request(
+                        "body must be JSON object with a text field",
+                        "invalid_json",
+                    )
+                }
             };
-            let text = body.text.trim();
+            let text = sanitize_speak_text(&body.text);
             if text.is_empty() {
-                return HttpResponse::bad_request("text must not be empty");
+                return HttpResponse::bad_request("text must not be empty", "empty_text");
             }
             if text.chars().count() > MAX_TEXT_CHARS {
-                return HttpResponse::bad_request("text exceeds 10000 characters");
+                return HttpResponse::bad_request("text exceeds 10000 characters", "text_too_long");
             }
-            enqueue(tx, ApiCommand::Speak { text: text.into() })
+            enqueue(tx, ApiCommand::Speak { text })
         }
-        ("POST", "/v1/stop") => enqueue(tx, ApiCommand::Stop),
-        _ => HttpResponse::json(404, "Not Found", r#"{"error":"not found"}"#),
+        ("POST", "/v1/stop") => {
+            if request.content_length > 0 {
+                return HttpResponse::bad_request("unexpected request body", "bad_request");
+            }
+            enqueue(tx, ApiCommand::Stop)
+        }
+        _ => HttpResponse::json(
+            404,
+            "Not Found",
+            r#"{"error":"not found","code":"not_found"}"#,
+        ),
     }
 }
 
@@ -318,6 +399,12 @@ mod tests {
             method: method.into(),
             path: path.into(),
             body: body.to_vec(),
+            content_type: if body.is_empty() {
+                None
+            } else {
+                Some("application/json".into())
+            },
+            content_length: body.len(),
         }
     }
 
@@ -358,6 +445,32 @@ mod tests {
             400
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_json_fields() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        assert_eq!(
+            route(
+                request("POST", "/v1/speak", br#"{"text":"hi","tone":"calm"}"#),
+                &tx
+            )
+            .status,
+            400
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn sanitizes_control_chars_in_speak_text() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let body = br#"{"text":"  hi\u0007there  "}"#;
+        let response = route(request("POST", "/v1/speak", body), &tx);
+        assert_eq!(response.status, 202);
+        match rx.try_recv().unwrap() {
+            ApiCommand::Speak { text } => assert_eq!(text, "hithere"),
+            _ => panic!("expected speak"),
+        }
     }
 
     #[test]
