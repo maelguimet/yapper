@@ -54,6 +54,7 @@ class ToneSpec:
     exaggeration: float
     cfg_weight: float
     rate: float
+    reference_language: str | None = None
 
 
 def clone_source_dir() -> Path | None:
@@ -69,6 +70,7 @@ def clone_source_dir() -> Path | None:
 
 
 DEFAULT_VOICE = "default"
+REFERENCE_LANGUAGES = frozenset({"en", "fr"})
 
 
 def _voice_prefix(voice: str) -> str:
@@ -121,20 +123,26 @@ def load_knobs(voices_root: Path | None = None) -> dict[str, dict[str, float]]:
 def list_tone_names(voices_root: Path | None = None, voice: str = DEFAULT_VOICE) -> list[str]:
     root = voices_root or resolve_voices_root()
     prefix = _voice_prefix(voice)
-    found = sorted(
-        p.stem.removeprefix(f"{prefix}_")
-        for p in root.glob(f"{prefix}_*.wav")
-        if p.is_file()
-    )
+    found = _tone_names_for_prefix(root, prefix)
     if not found:
-        found = sorted(
-            p.stem.removeprefix("eve_")
-            for p in root.glob("eve_*.wav")
-            if p.is_file()
-        )
+        found = _tone_names_for_prefix(root, "eve")
     if found:
         return found
     return list(DEFAULT_TONES)
+
+
+def _tone_names_for_prefix(root: Path, prefix: str) -> list[str]:
+    """List tones without exposing the optional language filename component."""
+    found: set[str] = set()
+    for path in root.glob(f"{prefix}_*.wav"):
+        if not path.is_file():
+            continue
+        suffix = path.stem.removeprefix(f"{prefix}_")
+        language, separator, language_tone = suffix.partition("_")
+        tone = language_tone if separator and language in REFERENCE_LANGUAGES else suffix
+        if tone in DEFAULT_TONES:
+            found.add(tone)
+    return sorted(found)
 
 
 def neutral_voice_present(
@@ -149,7 +157,10 @@ def neutral_voice_present(
 
 
 def resolve_tone(
-    name: str, voices_root: Path | None = None, voice: str = DEFAULT_VOICE
+    name: str,
+    voices_root: Path | None = None,
+    voice: str = DEFAULT_VOICE,
+    language: str | None = None,
 ) -> ToneSpec:
     root = voices_root or resolve_voices_root()
     tone = (name or "neutral").strip().lower()
@@ -157,30 +168,29 @@ def resolve_tone(
     knobs = load_knobs(root)
     if tone not in knobs and tone not in DEFAULT_TONES:
         raise KeyError(f"unknown tone: {tone!r}")
-    ref = root / f"{prefix}_{tone}.wav"
-    if not ref.is_file():
-        legacy = root / f"eve_{tone}.wav"
-        if legacy.is_file():
-            ref = legacy
-    if not ref.is_file():
-        clone = clone_source_dir()
-        if clone is not None:
-            for sub in ("gold", "prompts"):
-                for stem in (f"{prefix}_{tone}", f"eve_{tone}"):
-                    alt = clone / sub / f"{stem}.wav"
-                    if alt.is_file():
-                        ref = alt
-                        break
-                if ref.is_file():
-                    break
-    if not ref.is_file():
-        neutral = root / f"{prefix}_neutral.wav"
-        if neutral.is_file():
-            ref = neutral
-        elif (root / "eve_neutral.wav").is_file():
-            ref = root / "eve_neutral.wav"
-    if not ref.is_file():
-        raise FileNotFoundError(f"missing reference wav for tone {tone}: {ref}")
+    requested_language = (language or "").strip().lower() or None
+    language_stems: list[tuple[str, str | None]] = []
+    if requested_language in REFERENCE_LANGUAGES:
+        language_stems.extend(
+            (stem, requested_language)
+            for stem in _candidate_stems(prefix, tone, requested_language)
+        )
+        if tone != "neutral":
+            language_stems.extend(
+                (stem, requested_language)
+                for stem in _candidate_stems(prefix, "neutral", requested_language)
+            )
+    generic_stems: list[tuple[str, str | None]] = [
+        (stem, None) for stem in _candidate_stems(prefix, tone)
+    ]
+    if tone != "neutral":
+        generic_stems.extend(
+            (stem, None) for stem in _candidate_stems(prefix, "neutral")
+        )
+    ref, reference_language = _first_reference(root, language_stems + generic_stems)
+    if ref is None:
+        expected = root / f"{prefix}_{tone}.wav"
+        raise FileNotFoundError(f"missing reference wav for tone {tone}: {expected}")
     k = knobs.get(tone, DEFAULT_KNOBS.get(tone, {"exg": 0.5, "cfg": 0.5, "rate": 1.0}))
     return ToneSpec(
         name=tone,
@@ -188,4 +198,26 @@ def resolve_tone(
         exaggeration=float(k.get("exg", 0.5)),
         cfg_weight=float(k.get("cfg", 0.5)),
         rate=float(k.get("rate", 1.0)),
+        reference_language=reference_language,
     )
+
+
+def _candidate_stems(prefix: str, tone: str, language: str | None = None) -> list[str]:
+    middle = f"{language}_" if language else ""
+    return list(dict.fromkeys((f"{prefix}_{middle}{tone}", f"eve_{middle}{tone}")))
+
+
+def _first_reference(
+    root: Path, candidates: list[tuple[str, str | None]]
+) -> tuple[Path | None, str | None]:
+    clone = clone_source_dir()
+    for stem, reference_language in candidates:
+        installed = root / f"{stem}.wav"
+        if installed.is_file():
+            return installed, reference_language
+        if clone is not None:
+            for sub in ("gold", "prompts"):
+                private = clone / sub / f"{stem}.wav"
+                if private.is_file():
+                    return private, reference_language
+    return None, None

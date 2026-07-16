@@ -113,6 +113,9 @@ def test_list_load_synth_en_fr_unload() -> None:
     assert by_id["2"]["ok"] is True, by_id["2"]
     assert by_id["3"]["ok"] is True, by_id["3"]
     assert by_id["4"]["ok"] is True, by_id["4"]
+    assert by_id["4"]["result"]["language"] == "fr"
+    assert by_id["4"]["result"]["cfg_weight"] == 0.2
+    assert by_id["4"]["result"]["reference_language"] is None
     assert _wav_ok(out_en), f"bad EN wav {out_en} size={out_en.stat().st_size if out_en.exists() else 0}"
     assert _wav_ok(out_fr), f"bad FR wav {out_fr}"
     assert by_id["5"]["ok"] is True

@@ -4,6 +4,10 @@ EU rules
 ---
 This is a test. Does the TTS work?
 ---
+AI improves RLHF. An API can use a GPU.
+---
+AI (artificial intelligence) and RLHF (training).
+---
 try tts and stt with gpt
 ---
 @illyism

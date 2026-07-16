@@ -56,6 +56,24 @@ def test_lowercase_tts_still_expanded():
     assert "T T S" in out
 
 
+def test_ai_rlhf_and_common_technical_initialisms_are_spelled():
+    out = sanitize_for_tts("AI improves RLHF. An API can use a GPU.")
+    assert out == "A I improves R L H F. An A P I can use a G P U."
+
+
+def test_uppercase_names_are_not_spelled():
+    assert sanitize_for_tts("ILIAS uses AI") == "ILIAS uses A I"
+
+
+def test_parentheticals_become_spoken_pauses_without_losing_content():
+    assert sanitize_for_tts(
+        "AI (artificial intelligence) and RLHF (training)."
+    ) == "A I, artificial intelligence, and R L H F, training."
+    assert sanitize_for_tts(
+        "Use AI (artificial intelligence)."
+    ) == "Use A I, artificial intelligence."
+
+
 def test_urls_become_short_placeholder():
     out = sanitize_for_tts("See https://example.com/path?q=1 now")
     assert "link" in out

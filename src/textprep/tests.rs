@@ -107,6 +107,30 @@ fn lowercase_tts_stt_gpt_still_expanded() {
 }
 
 #[test]
+fn ai_and_rlhf_are_spelled_with_terminal_punctuation_preserved() {
+    let out = sanitize_for_tts("AI improves RLHF. An API can use a GPU.");
+    assert_eq!(out, "A I improves R L H F. An A P I can use a G P U.");
+}
+
+#[test]
+fn uppercase_names_are_not_spelled_as_initialisms() {
+    let out = sanitize_for_tts("ILIAS uses AI");
+    assert_eq!(out, "ILIAS uses A I");
+}
+
+#[test]
+fn parentheticals_become_spoken_pauses_without_losing_content() {
+    assert_eq!(
+        sanitize_for_tts("AI (artificial intelligence) and RLHF (training)."),
+        "A I, artificial intelligence, and R L H F, training."
+    );
+    assert_eq!(
+        sanitize_for_tts("Use AI (artificial intelligence)."),
+        "Use A I, artificial intelligence."
+    );
+}
+
+#[test]
 fn golden_sanitize_fixtures_match_expected() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/sanitize");
     let cases = std::fs::read_to_string(root.join("cases.txt")).expect("cases.txt");

@@ -10,13 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from yapper_common.ipc import Request, Response
+from yapper_tts.language import effective_cfg_weight, resolve_language, retry_cfg_weight
 from yapper_tts.tones import list_tone_names, resolve_tone
 
 log = logging.getLogger("yapper.tts")
 
 TTS_VERSION = "0.1.0"
 TTS_MODEL_ID = "chatterbox-multilingual"
-ALLOWED_LANGUAGES = frozenset({"en", "fr"})
+ALLOWED_LANGUAGES = frozenset({"auto", "en", "fr"})
 
 # Trailing silence after model audio — reduces abrupt cutoffs on chunked playback.
 TRAILING_PAD_MS = 150
@@ -161,12 +162,14 @@ class TtsWorker:
         if not text:
             raise TtsError("bad_args", "params.text is required and must be non-empty")
 
-        language = str(req.params.get("language", "en")).strip() or "en"
-        if language not in ALLOWED_LANGUAGES:
+        requested_language = str(req.params.get("language", "auto")).strip() or "auto"
+        if requested_language not in ALLOWED_LANGUAGES:
             raise TtsError(
                 "bad_args",
-                f"language must be one of {sorted(ALLOWED_LANGUAGES)}, got {language!r}",
+                "language must be one of "
+                f"{sorted(ALLOWED_LANGUAGES)}, got {requested_language!r}",
             )
+        language = resolve_language(requested_language, text)
 
         tone_name = str(req.params.get("tone", "neutral")).strip() or "neutral"
         voice = str(req.params.get("voice", "eve")).strip() or "eve"
@@ -177,7 +180,12 @@ class TtsWorker:
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            tone = resolve_tone(tone_name, voices_root=self.voices_root, voice=voice)
+            tone = resolve_tone(
+                tone_name,
+                voices_root=self.voices_root,
+                voice=voice,
+                language=language,
+            )
         except KeyError as exc:
             raise TtsError("bad_args", str(exc)) from exc
         except FileNotFoundError as exc:
@@ -185,14 +193,18 @@ class TtsWorker:
 
         import time
 
+        cfg_weight = effective_cfg_weight(language, tone.reference_language, tone.cfg_weight)
         log.info(
-            "synthesize lang=%s tone=%s ref=%s chars=%d exg=%.3f cfg=%.3f",
+            "synthesize lang=%s requested_lang=%s tone=%s ref=%s ref_lang=%s "
+            "chars=%d exg=%.3f cfg=%.3f",
             language,
+            requested_language,
             tone.name,
             tone.ref_wav,
+            tone.reference_language or "generic",
             len(text),
             tone.exaggeration,
-            tone.cfg_weight,
+            cfg_weight,
         )
         t0 = time.perf_counter()
         try:
@@ -201,7 +213,7 @@ class TtsWorker:
                 language_id=language,
                 audio_prompt_path=str(tone.ref_wav),
                 exaggeration=tone.exaggeration,
-                cfg_weight=tone.cfg_weight,
+                cfg_weight=cfg_weight,
             )
         except RuntimeError as exc:
             msg = str(exc).lower()
@@ -225,7 +237,9 @@ class TtsWorker:
                     language_id=language,
                     audio_prompt_path=str(tone.ref_wav),
                     exaggeration=min(tone.exaggeration, 0.35),
-                    cfg_weight=min(max(tone.cfg_weight, 0.3), 0.5),
+                    cfg_weight=retry_cfg_weight(
+                        language, tone.reference_language, cfg_weight
+                    ),
                 )
             except RuntimeError as exc:
                 msg = str(exc).lower()
@@ -256,6 +270,9 @@ class TtsWorker:
                 "sample_rate": sr,
                 "tone": tone.name,
                 "language": language,
+                "requested_language": requested_language,
+                "reference_language": tone.reference_language,
+                "cfg_weight": cfg_weight,
                 "duration_secs": duration,
                 "gen_ms": gen_ms,
             },

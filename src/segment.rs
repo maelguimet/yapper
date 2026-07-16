@@ -153,15 +153,25 @@ fn is_abbreviation(buf: &str) -> bool {
             }
         }
     }
-    // Single capital letter + period (e.g. "A. Turing" mid-initial)
+    // Single capital letter + period (e.g. "A. Turing" mid-initial). A run of
+    // spaced capitals is a spoken initialism (`A I.` / `R L H F.`), whose final
+    // period is a real sentence boundary.
     if let Some(stripped) = trimmed.strip_suffix('.') {
-        let last = stripped.chars().rev().take_while(|c| c.is_alphabetic()).collect::<String>();
-        let last: String = last.chars().rev().collect();
-        if last.len() == 1 && last.chars().next().unwrap().is_uppercase() {
+        let mut words = stripped.split_whitespace().rev();
+        let last = words.next().unwrap_or("");
+        let previous = words.next().unwrap_or("");
+        if is_single_upper_letter(last) && !is_single_upper_letter(previous) {
             return true;
         }
     }
     false
+}
+
+fn is_single_upper_letter(token: &str) -> bool {
+    let mut letters = token
+        .trim_matches(|c: char| matches!(c, '(' | '[' | '"' | '\'' | '«' | '“'))
+        .chars();
+    matches!(letters.next(), Some(c) if c.is_uppercase()) && letters.next().is_none()
 }
 
 fn push_segment(out: &mut Vec<String>, raw: &str, max_chars: usize) {
@@ -256,6 +266,27 @@ mod tests {
             "abbreviations should not explode: {segs:?}"
         );
         assert!(segs[0].contains("Dr. Smith") || segs.join(" ").contains("Dr. Smith"));
+    }
+
+    #[test]
+    fn spelled_initialisms_end_sentences() {
+        let segs = split_for_tts("A I. R L H F. Done.");
+        assert_eq!(segs, ["A I.", "R L H F.", "Done."]);
+    }
+
+    #[test]
+    fn parenthetical_initialism_does_not_swallow_next_sentence() {
+        let cleaned = crate::textprep::sanitize_for_tts(
+            "This uses AI (and RLHF). Parentheticals keep working.",
+        );
+        let segs = split_for_tts(&cleaned);
+        assert_eq!(
+            segs,
+            [
+                "This uses A I, and R L H F.",
+                "Parentheticals keep working."
+            ]
+        );
     }
 
     #[test]

@@ -167,11 +167,7 @@ impl YapperApp {
 
         let stt_model = cfg.stt.model.clone();
         let tts_tone = cfg.tts.tone.clone();
-        let tts_language = if cfg.tts.language == "auto" {
-            "en".into()
-        } else {
-            cfg.tts.language.clone()
-        };
+        let tts_language = cfg.tts.language.clone();
         let stt_language = cfg.stt.language.clone();
         let copy_transcript = cfg.stt.copy_transcript;
         let read_clipboard = cfg.read_aloud.source == "clipboard";
