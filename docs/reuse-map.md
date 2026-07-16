@@ -13,6 +13,11 @@ Yapper does **not** ship proprietary voice banks or model weights in git.
 
 Files use the pattern `{voice}_{tone}.wav` (default voice id: `default`). A single `default_neutral.wav` is enough for all tones (emotion knobs in code / optional `knobs.json`).
 
+Optional language-matched references use `{voice}_{language}_{tone}.wav`, for
+example `default_fr_neutral.wav`. Yapper prefers that file for French. When it
+must use the generic English reference instead, it caps Chatterbox CFG at 0.2
+to reduce English accent transfer without destabilizing short speech chunks.
+
 ## Chatterbox + Whisper weights
 
 Downloaded at runtime into `YAPPER_MODELS_DIR` (see `scripts/download_models.py`). Chatterbox pulls from Hugging Face on first TTS load.

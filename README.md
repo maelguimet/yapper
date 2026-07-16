@@ -73,6 +73,11 @@ Install creates a **default neutral reference** (Piper `ljspeech` — public-dom
 - Extra VRAM headroom (12 GB class GPU is comfortable if you unload when using other GPU apps)
 - Whisper **medium** (~1.5 GiB) — not downloaded by default; see install flags below
 
+For the best French accent, you may install a native French reference as
+`{voice}_fr_{tone}.wav` (for example `default_fr_neutral.wav`). Without one,
+Yapper automatically limits cross-language CFG guidance so the bundled English
+reference does not pull French pronunciation toward an English accent.
+
 ### Always-on tray (required for ship UX)
 
 Yapper is a **tray app**, not a document window:

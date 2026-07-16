@@ -133,7 +133,7 @@ impl YapperApp {
                 egui::ComboBox::from_id_salt("tts_lang")
                     .selected_text(&self.tts_language)
                     .show_ui(ui, |ui| {
-                        for l in ["en", "fr"] {
+                        for l in ["auto", "en", "fr"] {
                             ui.selectable_value(&mut self.tts_language, l.into(), l);
                         }
                     });

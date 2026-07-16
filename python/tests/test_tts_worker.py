@@ -191,6 +191,34 @@ def test_synthesize_bad_language(tmp_path: Path) -> None:
     assert resp.error.code == "bad_args"
 
 
+def test_synthesize_auto_detects_french(tmp_path: Path) -> None:
+    (tmp_path / "eve_neutral.wav").write_bytes(b"RIFF....WAVE")
+    model = _ScriptedModel([_tone(3 * 24000)])
+    worker = TtsWorker(voices_root=tmp_path)
+    worker.state.model = model
+    worker.state.sample_rate = model.sr
+
+    response = worker.handle(
+        Request(
+            id="fr-auto",
+            cmd="synthesize",
+            params={
+                "text": "Bonjour, ceci est une phrase en français.",
+                "language": "auto",
+                "tone": "neutral",
+                "voice": "eve",
+                "out_path": str(tmp_path / "fr-auto.wav"),
+            },
+        )
+    )
+
+    assert response.ok, getattr(response.error, "message", None)
+    assert model.kwargs[0]["language_id"] == "fr"
+    assert model.kwargs[0]["cfg_weight"] == 0.2
+    assert response.result["requested_language"] == "auto"
+    assert response.result["language"] == "fr"
+
+
 def test_unload_ok() -> None:
     w = TtsWorker()
     assert w.handle(Request(id="8", cmd="unload")).ok
@@ -204,9 +232,11 @@ class _ScriptedModel:
         self.sr = 24000
         self.calls = 0
         self.delay_s = delay_s
+        self.kwargs: list[dict[str, object]] = []
 
     def generate(self, text: str, **kwargs: object) -> np.ndarray:
         self.calls += 1
+        self.kwargs.append(kwargs)
         if self.delay_s > 0:
             time.sleep(self.delay_s)
         if not self._waves:
@@ -221,6 +251,61 @@ def _long_prose() -> str:
         "never accept a tiny near-instant clip as valid speech audio output. "
         "Done."
     )
+
+
+def test_french_with_generic_reference_disables_accent_transfer(tmp_path: Path) -> None:
+    (tmp_path / "eve_neutral.wav").write_bytes(b"RIFF....WAVE")
+    model = _ScriptedModel([_tone(3 * 24000)])
+    worker = TtsWorker(voices_root=tmp_path)
+    worker.state.model = model
+    worker.state.sample_rate = model.sr
+
+    response = worker.handle(
+        Request(
+            id="fr-generic",
+            cmd="synthesize",
+            params={
+                "text": "Bonjour, ceci est une phrase en français.",
+                "language": "fr",
+                "tone": "neutral",
+                "voice": "eve",
+                "out_path": str(tmp_path / "fr-generic.wav"),
+            },
+        )
+    )
+
+    assert response.ok, getattr(response.error, "message", None)
+    assert model.kwargs[0]["language_id"] == "fr"
+    assert model.kwargs[0]["cfg_weight"] == 0.2
+    assert response.result["reference_language"] is None
+
+
+def test_french_reference_keeps_configured_voice_guidance(tmp_path: Path) -> None:
+    french_ref = tmp_path / "eve_fr_neutral.wav"
+    french_ref.write_bytes(b"RIFF....WAVE")
+    model = _ScriptedModel([_tone(3 * 24000)])
+    worker = TtsWorker(voices_root=tmp_path)
+    worker.state.model = model
+    worker.state.sample_rate = model.sr
+
+    response = worker.handle(
+        Request(
+            id="fr-native",
+            cmd="synthesize",
+            params={
+                "text": "Bonjour, ceci est une phrase en français.",
+                "language": "fr",
+                "tone": "neutral",
+                "voice": "eve",
+                "out_path": str(tmp_path / "fr-native.wav"),
+            },
+        )
+    )
+
+    assert response.ok, getattr(response.error, "message", None)
+    assert model.kwargs[0]["audio_prompt_path"] == str(french_ref)
+    assert model.kwargs[0]["cfg_weight"] == 0.5
+    assert response.result["reference_language"] == "fr"
 
 
 def test_synthesize_retry_updates_gen_ms_and_duration(

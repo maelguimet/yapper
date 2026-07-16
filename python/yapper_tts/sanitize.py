@@ -6,7 +6,8 @@ Rules:
 - Replace http(s)://… and www.… with the short speakable placeholder ``link``.
 - Drop standalone ``#hashtag`` tokens and ``@handle`` lines/tokens (prose kept).
 - Cap unbroken tokens at ``MAX_UNBROKEN_TOKEN_CHARS`` by inserting spaces.
-- Expand TTS/STT/GPT (any case) and uppercase-only ``EU``; leave French ``eu``.
+- Expand common initialisms such as AI/RLHF/TTS into spoken letters.
+- Turn parenthetical delimiters into comma pauses while keeping their text.
 - Keep FR letters/accents; strip emoji and other unsupported glyphs.
 """
 
@@ -37,11 +38,23 @@ _HANDLE_ONLY = re.compile(r"^@\w+$")
 _HANDLE_INLINE = re.compile(r"@\w+")
 _HASHTAG_TOKEN = re.compile(r"^#\w+$")
 _URL_TRAIL_PUNCT = frozenset(".,;:!?)]'\"»")
-# Case-aware: TTS/STT/GPT any case; EU uppercase-only (French "eu" is a word).
+# Explicit list: do not spell every uppercase word (for example, names such as ILIAS).
 _ACRONYMS = (
+    (re.compile(r"\bRLHF\b"), "R L H F"),
+    (re.compile(r"\bVRAM\b"), "V R A M"),
     (re.compile(r"\bTTS\b", re.IGNORECASE), "T T S"),
     (re.compile(r"\bSTT\b", re.IGNORECASE), "S T T"),
     (re.compile(r"\bGPT\b", re.IGNORECASE), "G P T"),
+    (re.compile(r"\bLLM\b"), "L L M"),
+    (re.compile(r"\bNLP\b"), "N L P"),
+    (re.compile(r"\bAPI\b"), "A P I"),
+    (re.compile(r"\bCPU\b"), "C P U"),
+    (re.compile(r"\bGPU\b"), "G P U"),
+    (re.compile(r"\bRAM\b"), "R A M"),
+    (re.compile(r"\bAI\b"), "A I"),
+    (re.compile(r"\bML\b"), "M L"),
+    (re.compile(r"\bUI\b"), "U I"),
+    (re.compile(r"\bUX\b"), "U X"),
     (re.compile(r"\bEU\b"), "E U"),  # no IGNORECASE — preserve French "eu"
 )
 _MULTI_WS = re.compile(r"\s+")
@@ -72,10 +85,52 @@ def _sanitize_line(line: str) -> str:
     s = "".join(ch for ch in s if _keep_char(ch))
     s = _MULTI_WS.sub(" ", s).strip()
     s = _drop_standalone_hashtags(s)
+    s = _normalize_parenthetical_pauses(s)
     s = _cap_unbroken_tokens(s, MAX_UNBROKEN_TOKEN_CHARS)
     for pattern, repl in _ACRONYMS:
         s = pattern.sub(repl, s)
     return s
+
+
+def _normalize_parenthetical_pauses(s: str) -> str:
+    """Keep parenthetical prose, replacing delimiters with speakable pauses."""
+    chars = list(s)
+    out: list[str] = []
+    normalized_stack: list[bool] = []
+    pause_or_terminal = frozenset(",;:.!?…—–")
+
+    for i, ch in enumerate(chars):
+        if ch == "(":
+            # Whitespace-delimited parentheses are prose asides. Preserve
+            # attached pairs such as main() and println!(...) as code.
+            normalize = i == 0 or chars[i - 1].isspace()
+            normalized_stack.append(normalize)
+            if not normalize:
+                out.append(ch)
+                continue
+            while out and out[-1].isspace():
+                out.pop()
+            if out and out[-1] not in pause_or_terminal:
+                out.append(",")
+            if out:
+                out.append(" ")
+            continue
+        if ch == ")":
+            normalize = normalized_stack.pop() if normalized_stack else False
+            if not normalize:
+                out.append(ch)
+                continue
+            while out and out[-1].isspace():
+                out.pop()
+            following = next((c for c in chars[i + 1 :] if not c.isspace()), None)
+            if following is not None and following not in pause_or_terminal:
+                if out and out[-1] not in pause_or_terminal:
+                    out.append(",")
+            if following is not None and following not in pause_or_terminal and out:
+                out.append(" ")
+            continue
+        out.append(ch)
+    return _MULTI_WS.sub(" ", "".join(out)).strip()
 
 
 def _replace_urls(s: str) -> str:

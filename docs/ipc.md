@@ -59,7 +59,7 @@ or
 | `load` | `{ "model": "chatterbox-multilingual", "device": "cuda" }` | `{ "model": "...", "vram_mb": n }` |
 | `unload` | `{}` | `{}` |
 | `list_tones` | `{}` | `{ "tones": ["neutral", "calm", ...] }` |
-| `synthesize` | `{ "text": "...", "language": "en"\|"fr", "tone": "neutral", "voice": "eve", "out_path": "/tmp/out.wav" }` | `{ "path": "...", "sample_rate": 24000 }` |
+| `synthesize` | `{ "text": "...", "language": "auto"\|"en"\|"fr", "tone": "neutral", "voice": "eve", "out_path": "/tmp/out.wav" }` | `{ "path": "...", "sample_rate": 24000, "language": "en"\|"fr" }` |
 | `shutdown` | `{}` | `{}` then exit 0 |
 
 ## Concurrency

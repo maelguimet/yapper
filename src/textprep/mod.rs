@@ -5,8 +5,13 @@
 //! - Drop standalone `#hashtag` tokens and `@handle` lines/tokens (prose kept).
 //! - Cap unbroken tokens at [`MAX_UNBROKEN_TOKEN_CHARS`] by inserting spaces
 //!   (segmenter also hard-splits anything still over the TTS chunk limit).
-//! - Expand TTS/STT/GPT (any case) and uppercase-only `EU`; leave French `eu`.
+//! - Expand common initialisms such as AI/RLHF/TTS into spoken letters.
+//! - Turn parenthetical delimiters into comma pauses while keeping their text.
 //! - Keep FR letters/accents; strip emoji and other unsupported glyphs.
+
+mod parentheticals;
+
+use parentheticals::normalize_parenthetical_pauses;
 
 /// Exact B21 fixture (social/X paste that must not crash the pipeline).
 pub const B21_SOCIAL_FIXTURE: &str = "\
@@ -57,6 +62,7 @@ fn sanitize_line(line: &str) -> String {
     s = s.chars().filter(|c| keep_char(*c)).collect();
     let s = collapse_ws(&s);
     let s = drop_standalone_hashtags(&s);
+    let s = normalize_parenthetical_pauses(&s);
     let s = cap_unbroken_tokens(&s, MAX_UNBROKEN_TOKEN_CHARS);
     expand_acronyms(&s)
 }
@@ -231,18 +237,32 @@ enum AcronymCase {
     AnyCase,
 }
 
-/// Expand acronyms that Chatterbox tends to mispronounce (B25: TTS → "tits").
+/// Expand initialisms that Chatterbox tends to mispronounce (B25: TTS → "tits").
 ///
 /// Walks **Unicode scalar values** (not raw UTF-8 bytes). Byte-index expansion
 /// was corrupting FR accents on the real `do_speak` path (`Café` → `CafÃ©`).
 ///
+/// Product/technical initialisms are intentionally explicit rather than
+/// spelling every uppercase word: names such as `ILIAS` must remain words.
 /// `EU` is uppercase-only so French lowercase `eu` ("had") is left alone.
 fn expand_acronyms(s: &str) -> String {
     /// (ASCII acronym, spoken expansion, case rule). Longer entries first.
     const ACRONYMS: &[(&str, &str, AcronymCase)] = &[
+        ("RLHF", "R L H F", AcronymCase::UpperOnly),
+        ("VRAM", "V R A M", AcronymCase::UpperOnly),
         ("TTS", "T T S", AcronymCase::AnyCase),
         ("STT", "S T T", AcronymCase::AnyCase),
         ("GPT", "G P T", AcronymCase::AnyCase),
+        ("LLM", "L L M", AcronymCase::UpperOnly),
+        ("NLP", "N L P", AcronymCase::UpperOnly),
+        ("API", "A P I", AcronymCase::UpperOnly),
+        ("CPU", "C P U", AcronymCase::UpperOnly),
+        ("GPU", "G P U", AcronymCase::UpperOnly),
+        ("RAM", "R A M", AcronymCase::UpperOnly),
+        ("AI", "A I", AcronymCase::UpperOnly),
+        ("ML", "M L", AcronymCase::UpperOnly),
+        ("UI", "U I", AcronymCase::UpperOnly),
+        ("UX", "U X", AcronymCase::UpperOnly),
         ("EU", "E U", AcronymCase::UpperOnly),
     ];
     let chars: Vec<char> = s.chars().collect();

@@ -82,3 +82,28 @@ def test_neutral_voice_present_false_when_missing(tmp_path: Path) -> None:
 def test_neutral_voice_present_true_with_file(tmp_path: Path) -> None:
     (tmp_path / "eve_neutral.wav").write_bytes(b"RIFF....WAVE")
     assert neutral_voice_present(tmp_path)
+
+
+def test_french_reference_is_preferred_and_language_not_listed_as_tone(
+    tmp_path: Path,
+) -> None:
+    generic = tmp_path / "eve_neutral.wav"
+    french = tmp_path / "eve_fr_neutral.wav"
+    generic.write_bytes(b"generic")
+    french.write_bytes(b"french")
+
+    tone = resolve_tone("neutral", voices_root=tmp_path, voice="eve", language="fr")
+
+    assert tone.ref_wav == french
+    assert tone.reference_language == "fr"
+    assert list_tone_names(tmp_path, voice="eve") == ["neutral"]
+
+
+def test_french_reference_falls_back_to_generic(tmp_path: Path) -> None:
+    generic = tmp_path / "default_neutral.wav"
+    generic.write_bytes(b"generic")
+
+    tone = resolve_tone("neutral", voices_root=tmp_path, language="fr")
+
+    assert tone.ref_wav == generic
+    assert tone.reference_language is None
