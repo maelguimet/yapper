@@ -128,6 +128,8 @@ pub struct YapperApp {
     pub(crate) record_level: f32,
     pub(crate) main_tab: MainTab,
     pub(crate) theme_applied: bool,
+    /// Some Linux backends ignore the viewport's initial visibility; enforce it on frame one.
+    pub(crate) hide_on_first_frame: bool,
     /// Snapshot of work-tab prefs for autosave dirty detection.
     pub(crate) last_saved_prefs: PrefsSnapshot,
     /// When set, autosave is throttled until this instant after a persist failure.
@@ -148,7 +150,7 @@ pub struct PrefsSnapshot {
 
 impl YapperApp {
     /// Construct app state. Must not spawn Python workers or block on tone IPC.
-    pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>, start_hidden: bool) -> Self {
         let mut cfg = Config::load_or_default().unwrap_or_default();
         cfg.paths.python_root = resolve_python_root(&cfg).to_string_lossy().into();
         cfg.paths.python_bin = resolve_python_bin(&cfg);
@@ -233,6 +235,7 @@ impl YapperApp {
             record_level: 0.0,
             main_tab: super::parse_start_tab_env().unwrap_or(MainTab::Dictate),
             theme_applied: false,
+            hide_on_first_frame: start_hidden,
             last_saved_prefs,
             autosave_retry_after: None,
         };

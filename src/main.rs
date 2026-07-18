@@ -29,8 +29,26 @@ use workers::{resolve_python_bin, resolve_python_root, worker_package_status};
 #[derive(Parser, Debug)]
 #[command(name = "yapper", about = "Local tray STT + TTS (Whisper + Chatterbox)")]
 struct Cli {
+    /// Start the GUI hidden, leaving Yapper available from the system tray
+    #[arg(long)]
+    hidden: bool,
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn hidden_startup_is_opt_in() {
+        let normal = Cli::try_parse_from(["yapper"]).expect("default CLI should parse");
+        assert!(!normal.hidden);
+
+        let hidden = Cli::try_parse_from(["yapper", "--hidden"]).expect("hidden CLI should parse");
+        assert!(hidden.hidden);
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -46,8 +64,8 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    match cli.command.unwrap_or(Commands::Gui) {
+    let Cli { hidden, command } = Cli::parse();
+    match command.unwrap_or(Commands::Gui) {
         Commands::Version => {
             println!("yapper {}", env!("CARGO_PKG_VERSION"));
         }
@@ -67,7 +85,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Gui => {
-            app::run_gui()?;
+            app::run_gui(hidden)?;
         }
     }
     Ok(())

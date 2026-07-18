@@ -14,6 +14,10 @@ use eframe::egui;
 
 impl eframe::App for YapperApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if std::mem::take(&mut self.hide_on_first_frame) {
+            self.hide_to_tray(ctx);
+        }
+
         if !self.theme_applied {
             apply_yapper_theme(ctx);
             self.theme_applied = true;

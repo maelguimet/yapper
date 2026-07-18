@@ -269,6 +269,23 @@ PY
   fi
 }
 
+desktop_entry_contents() {
+  local args="${1:-}"
+  local startup_notify=true
+  [[ -n "$args" ]] && startup_notify=false
+  cat <<EOF
+[Desktop Entry]
+Type=Application
+Name=Yapper
+Comment=Local STT + TTS (Whisper + Chatterbox)
+Exec=$BIN_DIR/yapper$args
+Icon=audio-input-microphone
+Terminal=false
+Categories=AudioVideo;Utility;
+StartupNotify=$startup_notify
+EOF
+}
+
 desktop_entry() {
   log "desktop entry"
   local apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
@@ -278,17 +295,7 @@ desktop_entry() {
     return
   fi
   mkdir -p "$apps"
-  cat >"$desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Yapper
-Comment=Local STT + TTS (Whisper + Chatterbox)
-Exec=$BIN_DIR/yapper
-Icon=audio-input-microphone
-Terminal=false
-Categories=AudioVideo;Utility;
-StartupNotify=true
-EOF
+  desktop_entry_contents >"$desktop"
   log "wrote $desktop"
 }
 
@@ -314,21 +321,28 @@ prompt_autostart() {
     user)
       local ad="$HOME/.config/autostart"
       if [[ "$DRY_RUN" == "1" ]]; then
-        log "[dry-run] write $ad/yapper.desktop (user autostart)"
+        log "[dry-run] write $ad/yapper.desktop (user autostart, tray-only)"
         return
       fi
       mkdir -p "$ad"
-      cp "${XDG_DATA_HOME:-$HOME/.local/share}/applications/yapper.desktop" "$ad/yapper.desktop"
-      log "autostart user: $ad/yapper.desktop"
+      desktop_entry_contents " --hidden" >"$ad/yapper.desktop"
+      log "autostart user (tray-only): $ad/yapper.desktop"
       ;;
     all)
       if [[ "$DRY_RUN" == "1" ]]; then
-        log "[dry-run] sudo install /etc/xdg/autostart/yapper.desktop"
+        log "[dry-run] sudo install /etc/xdg/autostart/yapper.desktop (tray-only)"
         return
       fi
-      sudo install -m 644 "${XDG_DATA_HOME:-$HOME/.local/share}/applications/yapper.desktop" \
-        /etc/xdg/autostart/yapper.desktop
-      log "autostart all users: /etc/xdg/autostart/yapper.desktop"
+      local tmp_desktop
+      tmp_desktop="$(mktemp "${TMPDIR:-/tmp}/yapper-autostart.XXXXXX.desktop")"
+      desktop_entry_contents " --hidden" >"$tmp_desktop"
+      if sudo install -m 644 "$tmp_desktop" /etc/xdg/autostart/yapper.desktop; then
+        rm -f "$tmp_desktop"
+      else
+        rm -f "$tmp_desktop"
+        return 1
+      fi
+      log "autostart all users (tray-only): /etc/xdg/autostart/yapper.desktop"
       ;;
     *)
       log "autostart: no"
