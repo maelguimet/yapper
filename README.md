@@ -17,7 +17,7 @@ Whisper (STT) + Chatterbox multilingual (TTS). No cloud STT/TTS APIs.
 - Global hotkeys (rebindable; Capture picker + Apply):
   - **Super+Shift+S** — read selected text aloud (optional: clipboard)
   - **Super+Shift+R** — hold-to-talk → insert transcript at cursor (no auto-send)
-- Installer with optional start-on-boot (current user or all users)
+- Installer with optional start-on-boot (current user or all users); boot starts tray-only
 
 ## You need these things
 
@@ -106,7 +106,7 @@ Runtime config does **not** point workers at the git tree.
 git clone <repo-url> yapper
 cd yapper
 ./install.sh
-# prompts: start on boot? this user / all users / no
+# prompts: start on boot (tray-only)? this user / all users / no
 # non-interactive examples:
 #   YAPPER_AUTOSTART=user ./install.sh
 #   YAPPER_AUTOSTART=no ./install.sh
@@ -142,6 +142,7 @@ cd yapper
 ```bash
 yapper doctor   # host + worker ping checks (import from venv)
 yapper          # launch GUI + tray + hotkeys
+yapper --hidden # launch tray + hotkeys without opening the window (used at boot)
 ```
 
 Self-contained smoke (isolated temp venv, no checkout on `PYTHONPATH`):

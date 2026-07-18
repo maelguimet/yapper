@@ -238,6 +238,43 @@ DRY_RUN="$DRY_RUN_SAVE"
 if [[ -n "$YAS_SAVE" ]]; then YAPPER_AUTOSTART="$YAS_SAVE"; else unset YAPPER_AUTOSTART; fi
 rm -rf "$tmp_home"
 
+# --- normal launcher opens; boot autostart starts hidden --------------------
+
+echo "== installed desktop entries distinguish launch from boot =="
+tmp_home="$(mktemp -d "${TMPDIR:-/tmp}/yapper-desktop-test.XXXXXX")"
+HOME_SAVE="$HOME"
+XDG_D_SAVE="${XDG_DATA_HOME:-}"
+BIN_DIR_SAVE="$BIN_DIR"
+DRY_RUN_SAVE="$DRY_RUN"
+YAS_SAVE="${YAPPER_AUTOSTART:-}"
+export HOME="$tmp_home"
+export XDG_DATA_HOME="$tmp_home/.local/share"
+BIN_DIR="$tmp_home/.local/bin"
+DRY_RUN=0
+YAPPER_AUTOSTART=user
+
+desktop_entry >/dev/null
+prompt_autostart >/dev/null
+
+launcher="$XDG_DATA_HOME/applications/yapper.desktop"
+autostart="$HOME/.config/autostart/yapper.desktop"
+launcher_text="$(<"$launcher")"
+autostart_text="$(<"$autostart")"
+assert_contains "normal launcher opens the app" "$launcher_text" "Exec=$BIN_DIR/yapper"
+if [[ "$launcher_text" == *"--hidden"* ]]; then
+  bad "normal launcher must not start hidden"
+else
+  ok "normal launcher remains visible"
+fi
+assert_contains "boot autostart uses hidden mode" "$autostart_text" "Exec=$BIN_DIR/yapper --hidden"
+
+export HOME="$HOME_SAVE"
+if [[ -n "$XDG_D_SAVE" ]]; then export XDG_DATA_HOME="$XDG_D_SAVE"; else unset XDG_DATA_HOME; fi
+BIN_DIR="$BIN_DIR_SAVE"
+DRY_RUN="$DRY_RUN_SAVE"
+if [[ -n "$YAS_SAVE" ]]; then YAPPER_AUTOSTART="$YAS_SAVE"; else unset YAPPER_AUTOSTART; fi
+rm -rf "$tmp_home"
+
 # --- summary ----------------------------------------------------------------
 
 echo

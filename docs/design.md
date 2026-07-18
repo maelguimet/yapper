@@ -20,6 +20,7 @@ Primarily the machine owner on Pop!_OS / Ubuntu GNOME **X11** with an NVIDIA GPU
 - Window close / minimize → hide (`Visible(false)`); process stays up.
 - Tray **Open** → show + focus; tray **Quit** → hard exit only.
 - In-window **Exit…** requires confirmation (same as tray Quit).
+- Desktop/session autostart runs `yapper --hidden`; manual launch still opens the window.
 
 ## Chunked TTS + transport (v0.2)
 
@@ -168,8 +169,8 @@ shared by workers, `download_models.py`, `install_voices.sh`, and `yapper doctor
 7. Write `.desktop` file
 8. Ask boot options:
    - No
-   - Yes, this user (`~/.config/autostart/`)
-   - Yes, all users (sudo → `/etc/xdg/autostart/` or systemd)
+   - Yes, this user (`~/.config/autostart/`, tray-only)
+   - Yes, all users (sudo → `/etc/xdg/autostart/` or systemd, tray-only)
 
 ## Security / privacy
 

@@ -152,7 +152,7 @@ pub(crate) fn parse_start_tab_env() -> Option<MainTab> {
     parse_start_tab_str(&std::env::var("YAPPER_START_TAB").ok()?)
 }
 
-pub fn run_gui() -> Result<()> {
+pub fn run_gui(start_hidden: bool) -> Result<()> {
     match tts_api::start() {
         Ok(path) => eprintln!("Yapper TTS API: {}", path.display()),
         Err(error) => eprintln!("Yapper TTS API unavailable: {error:#}"),
@@ -165,13 +165,14 @@ pub fn run_gui() -> Result<()> {
             .with_inner_size([w, h])
             .with_min_inner_size([MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
             .with_maximized(false)
+            .with_visible(!start_hidden)
             .with_title(title),
         ..Default::default()
     };
     eframe::run_native(
         "Yapper",
         options,
-        Box::new(|cc| Ok(Box::new(YapperApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(YapperApp::new(cc, start_hidden)))),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))?;
     Ok(())
