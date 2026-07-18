@@ -16,6 +16,30 @@ pub enum ShellIntent {
     Noop,
 }
 
+/// One-shot resolution for `--hidden` once tray creation has been attempted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialVisibility {
+    Noop,
+    Hide,
+    Reveal,
+}
+
+pub fn initial_visibility(
+    start_hidden_pending: bool,
+    tray_ready: bool,
+    tray_attempted: bool,
+) -> InitialVisibility {
+    if !start_hidden_pending {
+        InitialVisibility::Noop
+    } else if tray_ready {
+        InitialVisibility::Hide
+    } else if tray_attempted {
+        InitialVisibility::Reveal
+    } else {
+        InitialVisibility::Noop
+    }
+}
+
 /// Window decoration close (X) or OS close request while we are always-on.
 ///
 /// Always hide — never hard-quit from the title-bar close button.
@@ -90,6 +114,26 @@ mod tests {
         assert!(!should_unload_on_exit(ShellIntent::HideToTray));
         assert!(should_cancel_close(false));
         assert!(!should_cancel_close(true));
+    }
+
+    #[test]
+    fn hidden_start_requires_a_working_tray_or_reveals_recovery_ui() {
+        assert_eq!(
+            initial_visibility(true, true, true),
+            InitialVisibility::Hide
+        );
+        assert_eq!(
+            initial_visibility(true, false, true),
+            InitialVisibility::Reveal
+        );
+        assert_eq!(
+            initial_visibility(true, false, false),
+            InitialVisibility::Noop
+        );
+        assert_eq!(
+            initial_visibility(false, true, true),
+            InitialVisibility::Noop
+        );
     }
 
     #[test]

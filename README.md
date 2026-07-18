@@ -88,6 +88,7 @@ Yapper is a **tray app**, not a document window:
 4. Tray **Quit** → only hard exit (unloads models).
 
 If the tray icon is missing, `yapper doctor` reports host/lib status and the GUI shows a loud error. Install/enable `gnome-shell-extension-appindicator` (package) / `ubuntu-appindicators@ubuntu.com` on GNOME.
+At boot, Yapper stays hidden only after tray creation succeeds; if tray creation fails, the window is revealed so recovery instructions are not stranded off-screen.
 
 ### Not supported in v0.2 primary
 
@@ -128,7 +129,7 @@ cd yapper
 |----------|---------|--------|
 | `YAPPER_DRY_RUN=1` | off | Print plan only: dep checks + which Whisper sizes would be ensured. **No** cargo build, pip, model download, or writes under XDG install paths. |
 | `YAPPER_MODELS` | `small` | Comma/space list of Whisper sizes to ensure at install: `small`, `medium`, or `small,medium`. Invalid sizes abort install. |
-| `YAPPER_AUTOSTART` | prompt / skip if non-TTY | `user` \| `all` \| `no` |
+| `YAPPER_AUTOSTART` | prompt / migrate managed legacy entry if non-TTY | `user` \| `all` \| `no` (`no` removes only Yapper-managed user autostart) |
 | `YAPPER_DEV_INSTALL=1` | off | Editable `python[dev]` into app venv (dev only; not for daily-driver) |
 | `YAPPER_PREFIX` | `~/.local` | Binary install prefix (`$PREFIX/bin/yapper`) |
 
