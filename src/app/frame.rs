@@ -2,7 +2,7 @@
 
 use super::{MainTab, YapperApp};
 use crate::audio::stop_recording;
-use crate::lifecycle::{ExitPromptState, ShellIntent};
+use crate::lifecycle::{initial_visibility, ExitPromptState, InitialVisibility, ShellIntent};
 use crate::transport::TransportStatus;
 use crate::tray::pump_gtk_events;
 use crate::ui::{
@@ -14,10 +14,6 @@ use eframe::egui;
 
 impl eframe::App for YapperApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if std::mem::take(&mut self.hide_on_first_frame) {
-            self.hide_to_tray(ctx);
-        }
-
         if !self.theme_applied {
             apply_yapper_theme(ctx);
             self.theme_applied = true;
@@ -33,6 +29,22 @@ impl eframe::App for YapperApp {
         self.poll_hotkey_capture(ctx);
         self.poll_hotkeys();
         self.poll_tray(ctx);
+        match initial_visibility(
+            self.start_hidden_pending,
+            self.tray.is_some(),
+            self.tray_tried,
+        ) {
+            InitialVisibility::Hide => {
+                self.start_hidden_pending = false;
+                self.hide_to_tray(ctx);
+            }
+            InitialVisibility::Reveal => {
+                self.start_hidden_pending = false;
+                self.show_window(ctx);
+                self.status = "tray unavailable — window kept open for recovery".into();
+            }
+            InitialVisibility::Noop => {}
+        }
         self.poll_tts_api();
         self.poll_record_level();
         self.drain_job_messages();

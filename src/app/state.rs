@@ -128,8 +128,8 @@ pub struct YapperApp {
     pub(crate) record_level: f32,
     pub(crate) main_tab: MainTab,
     pub(crate) theme_applied: bool,
-    /// Some Linux backends ignore the viewport's initial visibility; enforce it on frame one.
-    pub(crate) hide_on_first_frame: bool,
+    /// Resolve `--hidden` only after the first tray creation attempt.
+    pub(crate) start_hidden_pending: bool,
     /// Snapshot of work-tab prefs for autosave dirty detection.
     pub(crate) last_saved_prefs: PrefsSnapshot,
     /// When set, autosave is throttled until this instant after a persist failure.
@@ -235,7 +235,7 @@ impl YapperApp {
             record_level: 0.0,
             main_tab: super::parse_start_tab_env().unwrap_or(MainTab::Dictate),
             theme_applied: false,
-            hide_on_first_frame: start_hidden,
+            start_hidden_pending: start_hidden,
             last_saved_prefs,
             autosave_retry_after: None,
         };

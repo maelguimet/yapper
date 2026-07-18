@@ -299,10 +299,62 @@ desktop_entry() {
   log "wrote $desktop"
 }
 
+user_autostart_path() {
+  printf '%s/yapper.desktop\n' "${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+}
+
+managed_user_autostart_state() {
+  local target="$1"
+  local line exec_line=""
+  [[ -f "$target" ]] || { printf 'absent\n'; return; }
+  while IFS= read -r line; do
+    case "$line" in
+      Exec=*) exec_line="$line"; break ;;
+    esac
+  done <"$target"
+  case "$exec_line" in
+    "Exec=$BIN_DIR/yapper") printf 'legacy\n' ;;
+    "Exec=$BIN_DIR/yapper --hidden") printf 'hidden\n' ;;
+    *) printf 'custom\n' ;;
+  esac
+}
+
+migrate_managed_user_autostart() {
+  local target state
+  target="$(user_autostart_path)"
+  state="$(managed_user_autostart_state "$target")"
+  [[ "$state" == "legacy" ]] || return 0
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "[dry-run] migrate $target to tray-only autostart"
+    return
+  fi
+  desktop_entry_contents " --hidden" >"$target"
+  log "migrated existing user autostart to tray-only: $target"
+}
+
+remove_managed_user_autostart() {
+  local target state
+  target="$(user_autostart_path)"
+  state="$(managed_user_autostart_state "$target")"
+  case "$state" in
+    legacy|hidden)
+      if [[ "$DRY_RUN" == "1" ]]; then
+        log "[dry-run] remove managed user autostart $target"
+      else
+        rm -f "$target"
+        log "removed managed user autostart: $target"
+      fi
+      ;;
+    custom) log "autostart: preserving customized entry $target" ;;
+    absent) log "autostart: no" ;;
+  esac
+}
+
 prompt_autostart() {
   local mode="${YAPPER_AUTOSTART:-}"
   if [[ -z "$mode" ]]; then
     if [[ ! -t 0 ]]; then
+      migrate_managed_user_autostart
       log "non-interactive: skip autostart (set YAPPER_AUTOSTART=user|all|no)"
       return
     fi
@@ -319,7 +371,7 @@ prompt_autostart() {
   fi
   case "$mode" in
     user)
-      local ad="$HOME/.config/autostart"
+      local ad="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
       if [[ "$DRY_RUN" == "1" ]]; then
         log "[dry-run] write $ad/yapper.desktop (user autostart, tray-only)"
         return
@@ -344,9 +396,8 @@ prompt_autostart() {
       fi
       log "autostart all users (tray-only): /etc/xdg/autostart/yapper.desktop"
       ;;
-    *)
-      log "autostart: no"
-      ;;
+    no) remove_managed_user_autostart ;;
+    *) die "invalid YAPPER_AUTOSTART mode: ${mode@Q} (allowed: user, all, no)" ;;
   esac
 }
 

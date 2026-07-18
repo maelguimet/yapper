@@ -21,6 +21,7 @@ Primarily the machine owner on Pop!_OS / Ubuntu GNOME **X11** with an NVIDIA GPU
 - Tray **Open** → show + focus; tray **Quit** → hard exit only.
 - In-window **Exit…** requires confirmation (same as tray Quit).
 - Desktop/session autostart runs `yapper --hidden`; manual launch still opens the window.
+- Hidden startup is fail-open: defer the final hide until tray creation succeeds, or reveal the window with the tray error if creation fails.
 
 ## Chunked TTS + transport (v0.2)
 

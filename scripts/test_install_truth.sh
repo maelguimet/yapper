@@ -243,11 +243,13 @@ rm -rf "$tmp_home"
 echo "== installed desktop entries distinguish launch from boot =="
 tmp_home="$(mktemp -d "${TMPDIR:-/tmp}/yapper-desktop-test.XXXXXX")"
 HOME_SAVE="$HOME"
+XDG_C_SAVE="${XDG_CONFIG_HOME:-}"
 XDG_D_SAVE="${XDG_DATA_HOME:-}"
 BIN_DIR_SAVE="$BIN_DIR"
 DRY_RUN_SAVE="$DRY_RUN"
 YAS_SAVE="${YAPPER_AUTOSTART:-}"
 export HOME="$tmp_home"
+export XDG_CONFIG_HOME="$tmp_home/custom-config"
 export XDG_DATA_HOME="$tmp_home/.local/share"
 BIN_DIR="$tmp_home/.local/bin"
 DRY_RUN=0
@@ -257,7 +259,7 @@ desktop_entry >/dev/null
 prompt_autostart >/dev/null
 
 launcher="$XDG_DATA_HOME/applications/yapper.desktop"
-autostart="$HOME/.config/autostart/yapper.desktop"
+autostart="$XDG_CONFIG_HOME/autostart/yapper.desktop"
 launcher_text="$(<"$launcher")"
 autostart_text="$(<"$autostart")"
 assert_contains "normal launcher opens the app" "$launcher_text" "Exec=$BIN_DIR/yapper"
@@ -267,8 +269,36 @@ else
   ok "normal launcher remains visible"
 fi
 assert_contains "boot autostart uses hidden mode" "$autostart_text" "Exec=$BIN_DIR/yapper --hidden"
+if [[ -e "$HOME/.config/autostart/yapper.desktop" ]]; then
+  bad "custom XDG_CONFIG_HOME must not write the default autostart path"
+else
+  ok "user autostart honors custom XDG_CONFIG_HOME"
+fi
+
+# Noninteractive upgrades should repair the exact legacy entry, but no/custom
+# choices must still retain owner intent.
+desktop_entry_contents >"$autostart"
+unset YAPPER_AUTOSTART
+prompt_autostart >/dev/null
+autostart_text="$(<"$autostart")"
+assert_contains "noninteractive upgrade migrates legacy entry" "$autostart_text" "Exec=$BIN_DIR/yapper --hidden"
+
+YAPPER_AUTOSTART=no
+prompt_autostart >/dev/null
+if [[ -e "$autostart" ]]; then
+  bad "autostart=no must remove a managed entry"
+else
+  ok "autostart=no removes a managed entry"
+fi
+
+mkdir -p "$(dirname "$autostart")"
+printf '[Desktop Entry]\nName=Custom Yapper\nExec=/custom/yapper --special\n' >"$autostart"
+prompt_autostart >/dev/null
+autostart_text="$(<"$autostart")"
+assert_contains "autostart=no preserves customized entry" "$autostart_text" "Exec=/custom/yapper --special"
 
 export HOME="$HOME_SAVE"
+if [[ -n "$XDG_C_SAVE" ]]; then export XDG_CONFIG_HOME="$XDG_C_SAVE"; else unset XDG_CONFIG_HOME; fi
 if [[ -n "$XDG_D_SAVE" ]]; then export XDG_DATA_HOME="$XDG_D_SAVE"; else unset XDG_DATA_HOME; fi
 BIN_DIR="$BIN_DIR_SAVE"
 DRY_RUN="$DRY_RUN_SAVE"
