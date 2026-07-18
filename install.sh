@@ -305,18 +305,18 @@ user_autostart_path() {
 
 managed_user_autostart_state() {
   local target="$1"
-  local line exec_line=""
+  local actual legacy hidden
   [[ -f "$target" ]] || { printf 'absent\n'; return; }
-  while IFS= read -r line; do
-    case "$line" in
-      Exec=*) exec_line="$line"; break ;;
-    esac
-  done <"$target"
-  case "$exec_line" in
-    "Exec=$BIN_DIR/yapper") printf 'legacy\n' ;;
-    "Exec=$BIN_DIR/yapper --hidden") printf 'hidden\n' ;;
-    *) printf 'custom\n' ;;
-  esac
+  actual="$(<"$target")"
+  legacy="$(desktop_entry_contents)"
+  hidden="$(desktop_entry_contents " --hidden")"
+  if [[ "$actual" == "$legacy" ]]; then
+    printf 'legacy\n'
+  elif [[ "$actual" == "$hidden" ]]; then
+    printf 'hidden\n'
+  else
+    printf 'custom\n'
+  fi
 }
 
 migrate_managed_user_autostart() {

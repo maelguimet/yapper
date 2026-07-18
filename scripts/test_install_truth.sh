@@ -292,10 +292,16 @@ else
 fi
 
 mkdir -p "$(dirname "$autostart")"
-printf '[Desktop Entry]\nName=Custom Yapper\nExec=/custom/yapper --special\n' >"$autostart"
+desktop_entry_contents >"$autostart"
+printf 'OnlyShowIn=GNOME;\n' >>"$autostart"
+unset YAPPER_AUTOSTART
 prompt_autostart >/dev/null
 autostart_text="$(<"$autostart")"
-assert_contains "autostart=no preserves customized entry" "$autostart_text" "Exec=/custom/yapper --special"
+assert_contains "upgrade preserves customized legacy command" "$autostart_text" "OnlyShowIn=GNOME;"
+YAPPER_AUTOSTART=no
+prompt_autostart >/dev/null
+autostart_text="$(<"$autostart")"
+assert_contains "autostart=no preserves customized entry" "$autostart_text" "OnlyShowIn=GNOME;"
 
 export HOME="$HOME_SAVE"
 if [[ -n "$XDG_C_SAVE" ]]; then export XDG_CONFIG_HOME="$XDG_C_SAVE"; else unset XDG_CONFIG_HOME; fi
