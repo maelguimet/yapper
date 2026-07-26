@@ -8,7 +8,7 @@
 #   YAPPER_MODELS=small       Whisper sizes to ensure (default: small)
 #   YAPPER_MODELS=small,medium
 #   YAPPER_DEV_INSTALL=1      editable python[dev] into app venv (dev only)
-#   YAPPER_AUTOSTART=user|all|no
+#   YAPPER_AUTOSTART=user|no
 #   YAPPER_PREFIX=~/.local    binary install prefix
 set -euo pipefail
 
@@ -21,6 +21,9 @@ VENV="$DATA/venv"
 DRY_RUN="${YAPPER_DRY_RUN:-0}"
 # Dev-only: editable + [dev] extras into the app venv (not for normal install).
 DEV_INSTALL="${YAPPER_DEV_INSTALL:-0}"
+# Previous releases could write an unsafe system-wide entry here. This is a
+# fixed constant in production; tests override the shell variable after source.
+SYSTEM_AUTOSTART_DIR="/etc/xdg/autostart"
 
 # Default install fetches Whisper small only (~500 MiB). Medium (~1.5 GiB) is
 # optional via YAPPER_MODELS; first UI load of a missing size may still
@@ -354,22 +357,61 @@ remove_managed_user_autostart() {
   esac
 }
 
+legacy_system_autostart_state() {
+  local target="$SYSTEM_AUTOSTART_DIR/yapper.desktop"
+  local actual managed
+  [[ -e "$target" || -L "$target" ]] || { printf 'absent\n'; return; }
+  [[ -f "$target" && ! -L "$target" ]] || { printf 'custom\n'; return; }
+  actual="$(<"$target")"
+  managed="$(desktop_entry_contents " --hidden")"
+  if [[ "$actual" == "$managed" ]]; then
+    printf 'managed\n'
+  else
+    printf 'custom\n'
+  fi
+}
+
+remove_system_file() {
+  sudo rm -f -- "$1"
+}
+
+remove_legacy_system_autostart() {
+  local target state
+  target="$SYSTEM_AUTOSTART_DIR/yapper.desktop"
+  state="$(legacy_system_autostart_state)"
+  case "$state" in
+    absent) return 0 ;;
+    custom)
+      warn "preserving unrecognized system autostart entry: $target"
+      warn "review it manually; system-wide Yapper autostart is no longer supported"
+      ;;
+    managed)
+      if [[ "$DRY_RUN" == "1" ]]; then
+        log "[dry-run] remove unsafe legacy system autostart $target"
+        return
+      fi
+      log "removing unsafe legacy system autostart: $target"
+      remove_system_file "$target" \
+        || die "failed to remove unsafe legacy system autostart: $target"
+      ;;
+  esac
+}
+
 prompt_autostart() {
   local mode="${YAPPER_AUTOSTART:-}"
+  remove_legacy_system_autostart
   if [[ -z "$mode" ]]; then
     if [[ ! -t 0 ]]; then
       migrate_managed_user_autostart
-      log "non-interactive: skip autostart (set YAPPER_AUTOSTART=user|all|no)"
+      log "non-interactive: skip autostart (set YAPPER_AUTOSTART=user|no)"
       return
     fi
     echo "Start yapper on boot?"
     echo "  1) no"
     echo "  2) yes, this user only"
-    echo "  3) yes, all users (needs sudo)"
     read -r -p "Choice [1]: " ans || ans=1
     case "${ans:-1}" in
       2) mode=user ;;
-      3) mode=all ;;
       *) mode=no ;;
     esac
   fi
@@ -385,23 +427,10 @@ prompt_autostart() {
       log "autostart user (tray-only): $ad/yapper.desktop"
       ;;
     all)
-      if [[ "$DRY_RUN" == "1" ]]; then
-        log "[dry-run] sudo install /etc/xdg/autostart/yapper.desktop (tray-only)"
-        return
-      fi
-      local tmp_desktop
-      tmp_desktop="$(mktemp "${TMPDIR:-/tmp}/yapper-autostart.XXXXXX.desktop")"
-      desktop_entry_contents " --hidden" >"$tmp_desktop"
-      if sudo install -m 644 "$tmp_desktop" /etc/xdg/autostart/yapper.desktop; then
-        rm -f "$tmp_desktop"
-      else
-        rm -f "$tmp_desktop"
-        return 1
-      fi
-      log "autostart all users (tray-only): /etc/xdg/autostart/yapper.desktop"
+      die "YAPPER_AUTOSTART=all is unsupported: a per-user install cannot safely provide system-wide autostart; install Yapper separately for each account"
       ;;
     no) remove_managed_user_autostart ;;
-    *) die "invalid YAPPER_AUTOSTART mode: ${mode@Q} (allowed: user, all, no)" ;;
+    *) die "invalid YAPPER_AUTOSTART mode: ${mode@Q} (allowed: user, no)" ;;
   esac
 }
 

@@ -120,7 +120,8 @@ HF weights live under `~/.cache/huggingface/hub/models--ResembleAI--chatterbox` 
   - Create Python venv + install STT/TTS deps
   - Install desktop entry + tray autostart optional
   - Prompt **yes/no start on boot**
-  - If yes: **active user only** *or* **all users** (system unit / `/etc/xdg/autostart` with sudo)
+  - If yes: **active user only**. Never publish a system-wide desktop entry
+    that points at a per-user binary, venv, config, or model directory.
 - README: hard requirements list (distro assumptions OK)
 
 ---

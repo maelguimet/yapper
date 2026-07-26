@@ -17,7 +17,7 @@ Whisper (STT) + Chatterbox multilingual (TTS). No cloud STT/TTS APIs.
 - Global hotkeys (rebindable; Capture picker + Apply):
   - **Super+Shift+S** — read selected text aloud (optional: clipboard)
   - **Super+Shift+R** — hold-to-talk → insert transcript at cursor (no auto-send)
-- Installer with optional start-on-boot (current user or all users); boot starts tray-only
+- Installer with optional per-user start-on-boot; boot starts tray-only
 
 ## You need these things
 
@@ -107,7 +107,7 @@ Runtime config does **not** point workers at the git tree.
 git clone <repo-url> yapper
 cd yapper
 ./install.sh
-# prompts: start on boot (tray-only)? this user / all users / no
+# prompts: start on boot (tray-only)? this user / no
 # non-interactive examples:
 #   YAPPER_AUTOSTART=user ./install.sh
 #   YAPPER_AUTOSTART=no ./install.sh
@@ -129,9 +129,15 @@ cd yapper
 |----------|---------|--------|
 | `YAPPER_DRY_RUN=1` | off | Print plan only: dep checks + which Whisper sizes would be ensured. **No** cargo build, pip, model download, or writes under XDG install paths. |
 | `YAPPER_MODELS` | `small` | Comma/space list of Whisper sizes to ensure at install: `small`, `medium`, or `small,medium`. Invalid sizes abort install. |
-| `YAPPER_AUTOSTART` | prompt / migrate managed legacy entry if non-TTY | `user` \| `all` \| `no` (`no` removes only Yapper-managed user autostart) |
+| `YAPPER_AUTOSTART` | prompt / migrate managed legacy entry if non-TTY | `user` \| `no` (`no` removes only Yapper-managed user autostart; unsafe legacy system-wide entries are removed) |
 | `YAPPER_DEV_INSTALL=1` | off | Editable `python[dev]` into app venv (dev only; not for daily-driver) |
 | `YAPPER_PREFIX` | `~/.local` | Binary install prefix (`$PREFIX/bin/yapper`) |
+
+System-wide autostart is intentionally unsupported: Yapper's binary, Python
+environment, config, and models are installed per user. Older
+`YAPPER_AUTOSTART=all` entries that exactly match Yapper's former installer
+output are removed during upgrade; unrecognized customized entries are
+preserved with a warning for manual review.
 
 #### Whisper model policy
 

@@ -25,5 +25,7 @@ We will acknowledge receipt and aim to respond within a reasonable timeframe.
 - TTS checkpoint loading requires PyTorch 2.10.0+ and uses an immutable
   Hugging Face revision. Every allowed model file is size/SHA-256 checked
   before Chatterbox receives the local path.
+- Autostart is per-user only. Never place an `Exec` target under one user's
+  writable home directory in `/etc/xdg/autostart`.
 
 See `docs/tts-api.md` for the API contract.

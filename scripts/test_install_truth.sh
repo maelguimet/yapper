@@ -238,6 +238,74 @@ DRY_RUN="$DRY_RUN_SAVE"
 if [[ -n "$YAS_SAVE" ]]; then YAPPER_AUTOSTART="$YAS_SAVE"; else unset YAPPER_AUTOSTART; fi
 rm -rf "$tmp_home"
 
+# --- all-users mode is rejected; legacy managed entry is remediated ---------
+
+echo "== system-wide autostart is rejected and remediated =="
+tmp_home="$(mktemp -d "${TMPDIR:-/tmp}/yapper-system-autostart-test.XXXXXX")"
+HOME_SAVE="$HOME"
+XDG_C_SAVE="${XDG_CONFIG_HOME:-}"
+BIN_DIR_SAVE="$BIN_DIR"
+DRY_RUN_SAVE="$DRY_RUN"
+YAS_SAVE="${YAPPER_AUTOSTART:-}"
+SYSTEM_AUTOSTART_DIR_SAVE="$SYSTEM_AUTOSTART_DIR"
+export HOME="$tmp_home"
+export XDG_CONFIG_HOME="$tmp_home/.config"
+BIN_DIR="$tmp_home/.local/bin"
+DRY_RUN=0
+SYSTEM_AUTOSTART_DIR="$tmp_home/etc/xdg/autostart"
+mkdir -p "$SYSTEM_AUTOSTART_DIR"
+
+YAPPER_AUTOSTART=all
+set +e
+out="$(prompt_autostart 2>&1)"
+rc=$?
+set -e
+if [[ "$rc" -eq 0 ]]; then
+  bad "YAPPER_AUTOSTART=all must fail"
+else
+  ok "YAPPER_AUTOSTART=all fails"
+fi
+assert_contains "all-users rejection explains per-user boundary" "$out" "per-user"
+if [[ -e "$SYSTEM_AUTOSTART_DIR/yapper.desktop" ]]; then
+  bad "rejected all-users mode wrote a system entry"
+else
+  ok "rejected all-users mode writes no system entry"
+fi
+
+remove_system_file() {
+  local target="$1"
+  [[ "$target" == "$SYSTEM_AUTOSTART_DIR/yapper.desktop" ]] || return 1
+  rm -f -- "$target"
+}
+desktop_entry_contents " --hidden" >"$SYSTEM_AUTOSTART_DIR/yapper.desktop"
+YAPPER_AUTOSTART=no
+out="$(prompt_autostart 2>&1)"
+if [[ -e "$SYSTEM_AUTOSTART_DIR/yapper.desktop" ]]; then
+  bad "managed legacy system entry was not removed"
+else
+  ok "managed legacy system entry is removed"
+fi
+assert_contains "legacy removal is logged" "$out" "removing unsafe legacy"
+
+desktop_entry_contents " --hidden" >"$SYSTEM_AUTOSTART_DIR/yapper.desktop"
+printf 'OnlyShowIn=GNOME;\n' >>"$SYSTEM_AUTOSTART_DIR/yapper.desktop"
+out="$(prompt_autostart 2>&1)"
+if [[ -e "$SYSTEM_AUTOSTART_DIR/yapper.desktop" ]]; then
+  ok "customized system entry is preserved"
+else
+  bad "customized system entry must be preserved"
+fi
+assert_contains "customized system entry warns" "$out" "review it manually"
+
+export HOME="$HOME_SAVE"
+if [[ -n "$XDG_C_SAVE" ]]; then export XDG_CONFIG_HOME="$XDG_C_SAVE"; else unset XDG_CONFIG_HOME; fi
+BIN_DIR="$BIN_DIR_SAVE"
+DRY_RUN="$DRY_RUN_SAVE"
+SYSTEM_AUTOSTART_DIR="$SYSTEM_AUTOSTART_DIR_SAVE"
+if [[ -n "$YAS_SAVE" ]]; then YAPPER_AUTOSTART="$YAS_SAVE"; else unset YAPPER_AUTOSTART; fi
+remove_system_file() { sudo rm -f -- "$1"; }
+rm -rf "$tmp_home"
+
 # --- normal launcher opens; boot autostart starts hidden --------------------
 
 echo "== installed desktop entries distinguish launch from boot =="
