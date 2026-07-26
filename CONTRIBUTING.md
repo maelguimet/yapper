@@ -13,6 +13,7 @@ cargo fmt --check
 cargo test --locked
 PYTHONPATH=python pytest -q -m 'not gpu'
 ./scripts/test_install_truth.sh
+timeout 60s ./scripts/pip_audit.sh
 ```
 
 GPU-marked tests are optional (`pytest -m gpu`).

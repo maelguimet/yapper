@@ -1,0 +1,31 @@
+name: Python security
+
+on:
+  push:
+    paths:
+      - ".github/workflows/python-security.yml"
+      - "python/requirements.txt"
+      - "python/security-lock.txt"
+      - "scripts/install_chatterbox.py"
+  pull_request:
+    paths:
+      - ".github/workflows/python-security.yml"
+      - "python/requirements.txt"
+      - "python/security-lock.txt"
+      - "scripts/install_chatterbox.py"
+  schedule:
+    - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install pip-audit==2.10.1
+      - run: timeout 60s ./scripts/pip_audit.sh

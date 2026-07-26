@@ -1,0 +1,7 @@
+# Security-critical packages installed by scripts/install_chatterbox.py.
+# pip-audit uses --no-deps because chatterbox-tts 0.1.7's published metadata
+# hard-pins vulnerable torch 2.6.0; the installer verifies and patches that
+# exact sdist before resolution, then runs pip check.
+chatterbox-tts==0.1.7
+torch==2.10.0
+torchaudio==2.10.0

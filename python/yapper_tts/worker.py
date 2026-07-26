@@ -11,6 +11,10 @@ from typing import Any
 
 from yapper_common.ipc import Request, Response
 from yapper_tts.language import effective_cfg_weight, resolve_language, retry_cfg_weight
+from yapper_tts.model_assets import (
+    download_verified_snapshot,
+    require_safe_torch_version,
+)
 from yapper_tts.tones import list_tone_names, resolve_tone
 
 log = logging.getLogger("yapper.tts")
@@ -117,6 +121,10 @@ class TtsWorker:
 
         try:
             import torch
+        except ImportError as exc:
+            raise TtsError("internal", f"missing dependency: {exc}") from exc
+        require_safe_torch_version(str(torch.__version__))
+        try:
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS
         except ImportError as exc:
             raise TtsError("internal", f"missing dependency: {exc}") from exc
@@ -126,7 +134,8 @@ class TtsWorker:
 
         log.info("loading %s on %s", model_name, device)
         try:
-            model = ChatterboxMultilingualTTS.from_pretrained(device=torch.device(device))
+            checkpoint_dir = download_verified_snapshot()
+            model = ChatterboxMultilingualTTS.from_local(checkpoint_dir, device=device)
         except RuntimeError as exc:
             msg = str(exc).lower()
             if "out of memory" in msg or ("cuda" in msg and "memory" in msg):

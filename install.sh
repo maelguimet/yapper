@@ -183,6 +183,7 @@ setup_python() {
       log "[dry-run] create venv + non-editable pip install python/ (no [dev])"
       log "[dry-run] workers land in $VENV — no runtime dependency on $ROOT"
     fi
+    log "[dry-run] install verified chatterbox-tts 0.1.7 with torch/torchaudio 2.10.0"
     return
   fi
   mkdir -p "$DATA"
@@ -200,8 +201,11 @@ setup_python() {
     # Non-editable: package copied into venv site-packages; checkout may be deleted after.
     pip install "$ROOT/python"
   fi
-  # Best-effort ML deps (may already be system-site)
-  pip install -r "$ROOT/python/requirements.txt" || warn "optional pip requirements incomplete"
+  # Chatterbox 0.1.7 publishes a vulnerable torch==2.6.0 pin. Download the
+  # exact verified sdist, patch only that metadata to 2.10.0, resolve the
+  # locked ML stack, and require a clean `pip check`.
+  "$VENV/bin/python" "$ROOT/scripts/install_chatterbox.py" \
+    --requirements "$ROOT/python/requirements.txt"
   deactivate || true
 }
 

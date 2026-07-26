@@ -22,5 +22,8 @@ We will acknowledge receipt and aim to respond within a reasonable timeframe.
 - Request text is **not logged** by the API layer.
 - Workers run as the **same user** as the GUI; any process running as that user can call the API.
 - Do not expose the socket via TCP forwarding unless you understand the trust boundary.
+- TTS checkpoint loading requires PyTorch 2.10.0+ and uses an immutable
+  Hugging Face revision. Every allowed model file is size/SHA-256 checked
+  before Chatterbox receives the local path.
 
 See `docs/tts-api.md` for the API contract.

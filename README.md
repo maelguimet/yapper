@@ -138,7 +138,10 @@ cd yapper
 - **Default install** ensures **small only** (faster, less disk). The UI still offers **medium**.
 - **Pre-fetch both:** `YAPPER_MODELS=small,medium ./install.sh` (or re-run download: `YAPPER_MODELS_DIR=~/.local/share/yapper/models python scripts/download_models.py small medium`).
 - **Lazy first use:** if you select a size that is not on disk, the STT worker’s `whisper.load_model(..., download_root=…)` may **network-download** that checkpoint into the models dir on first load. Prefer pre-fetching offline or with `YAPPER_MODELS` if you need a hermetic install.
-- Chatterbox multilingual weights come from Hugging Face cache / first TTS load (same local-only runtime; no cloud TTS API).
+- Chatterbox multilingual weights come from Hugging Face cache / first TTS load
+  (same local-only runtime; no cloud TTS API). Yapper pins the compatible
+  multilingual-v2 repository commit and verifies the size + SHA-256 of every
+  checkpoint before loading it; mutable `main` weights are never deserialized.
 
 ```bash
 yapper doctor   # host + worker ping checks (import from venv)
@@ -169,6 +172,7 @@ cd ~/projects/yapper
 python3 -m venv --system-site-packages .venv
 .venv/bin/pip install -U pip setuptools wheel
 .venv/bin/pip install -e 'python[dev]'   # editable + pytest/mypy/ruff — dev only
+.venv/bin/python scripts/install_chatterbox.py --requirements python/requirements.txt
 ./scripts/install_voices.sh
 .venv/bin/python scripts/download_models.py small medium
 cargo run -- doctor
@@ -178,6 +182,7 @@ PYTHONPATH=python pytest -q -m 'not gpu'
 # equivalent: PYTHONPATH=python pytest -q python/tests -m 'not gpu'
 # optional GPU smokes: PYTHONPATH=python pytest -q -m gpu
 cargo test --locked
+timeout 60s ./scripts/pip_audit.sh
 ```
 
 Optional: force the installer into editable mode (still not recommended for

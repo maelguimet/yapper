@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import sys
 import time
 import wave
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
+import pytest
 
 from yapper_common.ipc import Request
+import yapper_tts.worker as worker_module
 from yapper_tts.worker import (
     TRAILING_PAD_MS,
     TtsWorker,
@@ -69,6 +73,44 @@ def test_load_rejects_unknown_model() -> None:
     assert not resp.ok
     assert resp.error is not None
     assert resp.error.code == "bad_args"
+
+
+def test_load_uses_verified_local_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: dict[str, object] = {}
+    torch = ModuleType("torch")
+    torch.__version__ = "2.10.0+cu128"  # type: ignore[attr-defined]
+    torch.cuda = SimpleNamespace(is_available=lambda: False)  # type: ignore[attr-defined]
+
+    class FakeChatterbox:
+        sr = 24_000
+
+        @classmethod
+        def from_local(cls, checkpoint_dir: Path, device: str) -> "FakeChatterbox":
+            calls["checkpoint_dir"] = checkpoint_dir
+            calls["device"] = device
+            return cls()
+
+    chatterbox = ModuleType("chatterbox")
+    chatterbox.__path__ = []  # type: ignore[attr-defined]
+    mtl_tts = ModuleType("chatterbox.mtl_tts")
+    mtl_tts.ChatterboxMultilingualTTS = FakeChatterbox  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "chatterbox", chatterbox)
+    monkeypatch.setitem(sys.modules, "chatterbox.mtl_tts", mtl_tts)
+    monkeypatch.setattr(worker_module, "download_verified_snapshot", lambda: tmp_path)
+
+    response = TtsWorker().handle(
+        Request(
+            id="verified-load",
+            cmd="load",
+            params={"model": "chatterbox-multilingual", "device": "cpu"},
+        )
+    )
+
+    assert response.ok, getattr(response.error, "message", None)
+    assert calls == {"checkpoint_dir": tmp_path, "device": "cpu"}
 
 
 def test_synthesize_empty_text() -> None:
