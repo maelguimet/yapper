@@ -60,6 +60,9 @@ Typed Python process.
 Typed Python process.
 
 - Model: `ChatterboxMultilingualTTS`
+- Runtime requires PyTorch 2.10.0 or newer (CVE-2026-24747 floor).
+- Weights are downloaded from one immutable Hugging Face commit and every
+  permitted file is size/SHA-256 verified before `from_local()` deserializes it.
 - Inputs: text, `language_id` (`en`/`fr`/…), tone name → reference wav + knobs
 - Output: audio path or bytes (WAV preferred internally; optional mp3 via ffmpeg)
 - Default voice identity: **`default`** (`default_<tone>.wav`; install generates `default_neutral.wav` via Piper — see `assets/voices/ATTRIBUTION.md`)
@@ -178,6 +181,9 @@ shared by workers, `download_models.py`, `install_voices.sh`, and `yapper doctor
 - All audio stays local
 - No network required after model download
 - Workers only accept commands from the parent via local IPC
+- Remote model repositories are mutable and untrusted: never call Chatterbox's
+  `from_pretrained()` path, which follows `main`; use Yapper's pinned,
+  integrity-checked snapshot loader.
 
 ## Testing strategy
 
