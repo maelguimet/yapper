@@ -174,7 +174,10 @@ shared by workers, `download_models.py`, `install_voices.sh`, and `yapper doctor
 8. Ask boot options:
    - No
    - Yes, this user (`~/.config/autostart/`, tray-only)
-   - Yes, all users (sudo → `/etc/xdg/autostart/` or systemd, tray-only)
+
+System-wide autostart is not supported for a per-user installation. Publishing
+an `/etc/xdg/autostart` entry whose `Exec` target is under one account's home
+would execute user-writable code in every other desktop session.
 
 ## Security / privacy
 
