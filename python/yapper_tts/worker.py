@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from yapper_common.ipc import Request, Response
+from yapper_tts.alignment import trim_alignment_tail
 from yapper_tts.language import effective_cfg_weight, resolve_language, retry_cfg_weight
 from yapper_tts.model_assets import (
     download_verified_snapshot,
@@ -262,9 +263,11 @@ class TtsWorker:
                     f"TTS output failed sanity (duration={duration:.3f}s for {len(text)} chars)",
                 )
 
+        alignment = _alignment_tail_metadata(self.state.model)
+
         # Wall time covers accepted attempt (and retry when used), not only the first generate.
         gen_ms = (time.perf_counter() - t0) * 1000.0
-        duration = _write_wav(out_path, wav, sr)
+        duration = _write_wav(out_path, wav, sr, alignment=alignment)
         log.info(
             "synth done chars=%d duration=%.3fs gen_ms=%.0f path=%s",
             len(text),
@@ -380,7 +383,27 @@ def _output_sane(text: str, duration_secs: float, wav: Any) -> bool:
     return True
 
 
-def _write_wav(path: Path, wav: Any, sample_rate: int) -> float:
+def _alignment_tail_metadata(model: Any) -> dict[str, Any] | None:
+    """Read completion metadata belonging to the model's latest generation."""
+    t3 = getattr(model, "t3", None)
+    patched_model = getattr(t3, "patched_model", None)
+    analyzer = getattr(patched_model, "alignment_stream_analyzer", None)
+    if analyzer is None:
+        return None
+    return {
+        "complete": bool(getattr(analyzer, "complete", False)),
+        "completed_at": getattr(analyzer, "completed_at", None),
+        "frames": getattr(analyzer, "curr_frame_pos", None),
+    }
+
+
+def _write_wav(
+    path: Path,
+    wav: Any,
+    sample_rate: int,
+    *,
+    alignment: dict[str, Any] | None = None,
+) -> float:
     """Write 16-bit PCM WAV (NaN-safe) with a small trailing silence pad.
 
     Returns the duration in seconds of the written file (including pad when applied).
@@ -389,6 +412,28 @@ def _write_wav(path: Path, wav: Any, sample_rate: int) -> float:
     import numpy as np
 
     arr = _to_float_array(wav)
+    if alignment is not None and alignment.get("complete"):
+        completed_at = alignment.get("completed_at")
+        total_frames = alignment.get("frames")
+        if isinstance(completed_at, int) and isinstance(total_frames, int):
+            samples_before = arr.size
+            arr = trim_alignment_tail(
+                arr,
+                sample_rate,
+                completed_at=completed_at,
+                total_frames=total_frames,
+            )
+            removed_ms = (
+                (samples_before - arr.size) * 1_000.0 / sample_rate
+                if sample_rate > 0
+                else 0.0
+            )
+            log.info(
+                "alignment tail completed_at=%d frames=%d removed_ms=%.0f",
+                completed_at,
+                total_frames,
+                removed_ms,
+            )
     arr = np.clip(arr, -1.0, 1.0).astype(np.float32, copy=False)
     if arr.size > 0 and sample_rate > 0:
         peak = float(np.max(np.abs(arr)))
