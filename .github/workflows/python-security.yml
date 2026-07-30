@@ -2,6 +2,7 @@ name: Python security
 
 on:
   push:
+    branches: ["main"]
     paths:
       - ".github/workflows/python-security.yml"
       - "python/requirements.txt"
@@ -19,9 +20,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: python-security-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   pip-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
