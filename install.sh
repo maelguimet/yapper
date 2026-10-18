@@ -20,7 +20,7 @@ CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/yapper"
 VENV="$DATA/venv"
 DRY_RUN="${YAPPER_DRY_RUN:-0}"
 DEV_INSTALL="${YAPPER_DEV_INSTALL:-0}"
-SYSTEM_AUTOSTART_DIR="/etc/xdg/autostart"
+LEGACY_UNSAFE_SYSTEM_AUTOSTART_DIR="/etc/xdg/autostart"
 
 DEFAULT_YAPPER_MODELS="small"
 ALLOWED_WHISPER_SIZES="small medium"
@@ -341,7 +341,7 @@ remove_managed_user_autostart() {
 }
 
 legacy_system_autostart_state() {
-  local target="$SYSTEM_AUTOSTART_DIR/yapper.desktop"
+  local target="$LEGACY_UNSAFE_SYSTEM_AUTOSTART_DIR/yapper.desktop"
   local actual managed
   [[ -e "$target" || -L "$target" ]] || { printf 'absent\n'; return; }
   [[ -f "$target" && ! -L "$target" ]] || { printf 'custom\n'; return; }
@@ -360,7 +360,7 @@ remove_system_file() {
 
 remove_legacy_system_autostart() {
   local target state
-  target="$SYSTEM_AUTOSTART_DIR/yapper.desktop"
+  target="$LEGACY_UNSAFE_SYSTEM_AUTOSTART_DIR/yapper.desktop"
   state="$(legacy_system_autostart_state)"
   case "$state" in
     absent) return 0 ;;
