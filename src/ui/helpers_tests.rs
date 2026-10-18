@@ -125,7 +125,6 @@ fn tts_text_stats_counts_and_warns() {
     let (_, w) = tts_text_stats(&long);
     let long_warn = w.unwrap();
     assert!(long_warn.contains("Long paste"), "{long_warn}");
-    // Short one-line warn — no multi-sentence essay crowding Speak chrome.
     assert!(!long_warn.contains(';'), "{long_warn}");
     assert!(long_warn.chars().count() < 80, "{long_warn}");
     let huge: String = "b".repeat(TTS_VERY_LONG_TEXT_CHARS);
@@ -156,7 +155,6 @@ fn settings_model_status_is_not_debug_slop() {
     );
     assert_eq!(settings_model_status(false, true, None), "ready");
     assert_eq!(settings_model_status(false, true, Some("")), "ready");
-    // Must not emit the old "Active: loaded" debug-style chrome.
     for s in [
         settings_model_status(false, true, None),
         settings_model_status(false, false, None),

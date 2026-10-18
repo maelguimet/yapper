@@ -158,7 +158,6 @@ pub fn run_gui(start_hidden: bool) -> Result<()> {
         Err(error) => eprintln!("Yapper TTS API unavailable: {error:#}"),
     }
     let (w, h) = parse_window_size_env().unwrap_or((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT));
-    // YAPPER_WINDOW_TITLE isolates screenshot smokes from a leftover maximized window.
     let title = std::env::var("YAPPER_WINDOW_TITLE").unwrap_or_else(|_| "Yapper".into());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -197,7 +196,7 @@ mod tests {
     fn parse_window_size_str_accepts_wxh() {
         assert_eq!(parse_window_size_str("880x720"), Some((880.0, 720.0)));
         assert_eq!(parse_window_size_str("720X560"), Some((720.0, 560.0)));
-        assert_eq!(parse_window_size_str("100x100"), None); // below min
+        assert_eq!(parse_window_size_str("100x100"), None);
         assert_eq!(parse_window_size_str("nope"), None);
     }
 

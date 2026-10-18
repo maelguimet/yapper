@@ -72,7 +72,6 @@ impl eframe::App for YapperApp {
         };
         ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
 
-        // ── Top chrome: brand, status sentence, chips ─────────────────────
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -131,7 +130,6 @@ impl eframe::App for YapperApp {
             ui.add_space(2.0);
         });
 
-        // ── Bottom: sticky primary actions for active tab ────────────────
         egui::TopBottomPanel::bottom("bottom_actions").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -139,7 +137,6 @@ impl eframe::App for YapperApp {
                     MainTab::Dictate => {
                         if recording {
                             if danger_button(ui, "Stop and transcribe").clicked() {
-                                // Panel-only: never paste at cursor (unlike hotkey PTT).
                                 self.gui_record_release();
                             }
                         } else {
@@ -268,9 +265,6 @@ impl eframe::App for YapperApp {
                                 Err(e) => self.status = format!("replay error: {e:#}"),
                             }
                         }
-                        // Same restart path as Speak: read_aloud/do_speak → start_speak_job
-                        // (OOB kill when synth_in_flight). Stay enabled while busy so a new
-                        // selection/file can restart immediately — but not without Eve neutral.
                         let can_read_or_file = !self.tts_loading && voice_ok;
                         if ui
                             .add_enabled(can_read_or_file, egui::Button::new("Read selection"))
@@ -309,7 +303,6 @@ impl eframe::App for YapperApp {
                         }
                     }
                     MainTab::Settings => {
-                        // Hide lives only in the top strip (avoid duplicate chrome).
                         if ui.button("Save settings").clicked() {
                             self.persist();
                             self.status = "settings saved".into();
@@ -400,7 +393,6 @@ impl eframe::App for YapperApp {
             let _ = stop_recording(session);
         }
         self.hotkeys = None;
-        // OOB kill + UnloadAll + Shutdown + bounded join (no hang, no orphan workers).
         let _ = self
             .jobs
             .shutdown_bounded(super::live_pids::JOB_SHUTDOWN_JOIN_BUDGET);

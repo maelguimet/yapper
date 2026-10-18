@@ -48,7 +48,6 @@ def _run_worker(commands: list[dict]) -> list[dict]:
         raise AssertionError(
             f"worker failed rc={proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr[-4000:]}"
         )
-    # Filter protocol lines only (JSON objects)
     out: list[dict] = []
     for ln in proc.stdout.splitlines():
         ln = ln.strip()
@@ -147,7 +146,6 @@ def test_multi_sentence_monologue_and_cancel_mid_stream() -> None:
     segments = _split_sentences(monologue)
     assert len(segments) >= 3, segments
 
-    # --- Complete multi-segment path (same IPC shape as parent chunked speak) ---
     complete_paths = [SCRATCH / f"tts_chunk_{i}.wav" for i in range(len(segments))]
     for p in complete_paths:
         p.unlink(missing_ok=True)
@@ -179,7 +177,6 @@ def test_multi_sentence_monologue_and_cancel_mid_stream() -> None:
         assert by_id[f"seg{i}"]["ok"] is True, by_id[f"seg{i}"]
         assert _wav_ok(path), f"segment {i} bad wav {path}"
 
-    # --- Cancel mid-stream: only first segment synth'd, then unload (parent cancel) ---
     cancel_dir = SCRATCH / "cancel_mid"
     cancel_dir.mkdir(parents=True, exist_ok=True)
     first = cancel_dir / "only_first.wav"
@@ -201,7 +198,6 @@ def test_multi_sentence_monologue_and_cancel_mid_stream() -> None:
                 "out_path": str(first),
             },
         },
-        # Parent cancel = stop requesting further segments + unload
         {"id": "cunload", "cmd": "unload"},
         {"id": "cshutdown", "cmd": "shutdown"},
     ]

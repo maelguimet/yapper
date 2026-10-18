@@ -17,7 +17,6 @@ impl YapperApp {
             if capturing {
                 ui.colored_label(egui::Color32::LIGHT_BLUE, "Press combo… (Esc cancel)");
             } else {
-                // Draft only — live cfg.hotkeys changes solely on successful Apply.
                 let value = match field {
                     HotkeyCaptureField::ReadAloud => &mut self.hotkey_draft_read_aloud,
                     HotkeyCaptureField::PushToTalk => &mut self.hotkey_draft_push_to_talk,
@@ -82,7 +81,6 @@ impl YapperApp {
             });
         }
 
-        // Transcript card owns remaining vertical space.
         let rows = text_panel_rows((ui.available_height() - 8.0).max(0.0), 0.95);
         let frame = egui::Frame::none()
             .fill(egui::Color32::from_rgb(34, 38, 46))
@@ -150,7 +148,6 @@ impl YapperApp {
             });
         });
 
-        // Transport card — honest sentence progress, no idle 0:00/0:00.
         let st = self.transport.status();
         let transport_idle = matches!(st, TransportStatus::Idle);
         let time = self.transport.machine().format_time_label();
@@ -289,7 +286,6 @@ impl YapperApp {
                         self.unload_tts();
                     }
                     if ui.button("Unload all").clicked() {
-                        // Shared stop/OOB-kill/cleanup then UnloadAll (not bare enqueue).
                         self.unload_all_models();
                     }
                     ui.weak(self.tts_status_label());
@@ -341,7 +337,6 @@ impl YapperApp {
                 .unwrap_or_else(|| self.mic_source.clone())
         };
         let selected_display = truncate_display(&selected_full, MIC_LABEL_MAX_CHARS);
-        // Clone names/labels once for combo to avoid borrow issues without cloning every frame's Vec.
         let sources: Vec<(String, String)> = self
             .mic_sources
             .iter()

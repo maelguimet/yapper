@@ -38,7 +38,6 @@ pub fn split_for_tts_with_limit(text: &str, max_chars: usize) -> Vec<String> {
             || matches!(chars[i + 1], '"' | '\'' | '»' | ')' | ']');
 
         if is_sentence_ender(ch) && next_is_space_or_end && !is_abbreviation(&buf) {
-            // Include trailing closers/quotes
             let mut j = i + 1;
             while j < chars.len() && matches!(chars[j], '"' | '\'' | '»' | ')' | ']' | '”' | '’') {
                 buf.push(chars[j]);
@@ -46,7 +45,6 @@ pub fn split_for_tts_with_limit(text: &str, max_chars: usize) -> Vec<String> {
             }
             push_segment(&mut segments, &buf, max_chars);
             buf.clear();
-            // skip whitespace between sentences
             while j < chars.len() && chars[j].is_whitespace() {
                 j += 1;
             }
@@ -54,13 +52,11 @@ pub fn split_for_tts_with_limit(text: &str, max_chars: usize) -> Vec<String> {
             continue;
         }
 
-        // Soft break on newline when buffer is non-trivial
         if ch == '\n' && buf.trim().chars().count() >= 20 {
             push_segment(&mut segments, &buf, max_chars);
             buf.clear();
         }
 
-        // Prefer clause boundaries when approaching the hard cap.
         let buf_len = buf.chars().count();
         if buf_len >= max_chars.saturating_mul(3) / 4
             && is_clause_break(ch)
@@ -77,7 +73,6 @@ pub fn split_for_tts_with_limit(text: &str, max_chars: usize) -> Vec<String> {
             continue;
         }
 
-        // Hard cap: flush at last whitespace if over limit
         if buf.chars().count() >= max_chars {
             push_segment(&mut segments, &buf, max_chars);
             buf.clear();
@@ -116,7 +111,6 @@ fn ensure_nonfinal_terminal_punct(segments: &mut [String], max_chars: usize) {
         if is_sentence_ender(last_ch) || is_clause_break(last_ch) {
             continue;
         }
-        // Don't double-punctuate closers like quotes after a period already handled.
         if matches!(last_ch, '"' | '\'' | '»' | ')' | ']' | '”' | '’') {
             continue;
         }
@@ -131,16 +125,13 @@ fn is_sentence_ender(ch: char) -> bool {
 fn is_abbreviation(buf: &str) -> bool {
     let trimmed = buf.trim_end();
     let lower = trimmed.to_ascii_lowercase();
-    // Ends with known abbrev token
     const ABBREVS: &[&str] = &[
         "mr.", "mrs.", "ms.", "dr.", "prof.", "sr.", "jr.", "vs.", "etc.", "e.g.", "i.e.", "st.",
-        "rd.", "ave.", "approx.", "dept.", "est.", "fig.", "vol.", "pp.", "no.",
-        // French
-        "m.", "mme.", "mlle.", "dr.", "me.", "etc.", "cf.", "ex.",
+        "rd.", "ave.", "approx.", "dept.", "est.", "fig.", "vol.", "pp.", "no.", "m.", "mme.",
+        "mlle.", "dr.", "me.", "etc.", "cf.", "ex.",
     ];
     for a in ABBREVS {
         if lower.ends_with(a) {
-            // Ensure it's a token boundary (start or whitespace before)
             let without = &lower[..lower.len().saturating_sub(a.len())];
             if without.is_empty()
                 || without
@@ -153,9 +144,6 @@ fn is_abbreviation(buf: &str) -> bool {
             }
         }
     }
-    // Single capital letter + period (e.g. "A. Turing" mid-initial). A run of
-    // spaced capitals is a spoken initialism (`A I.` / `R L H F.`), whose final
-    // period is a real sentence boundary.
     if let Some(stripped) = trimmed.strip_suffix('.') {
         let mut words = stripped.split_whitespace().rev();
         let last = words.next().unwrap_or("");
@@ -183,7 +171,6 @@ fn push_segment(out: &mut Vec<String>, raw: &str, max_chars: usize) {
         out.push(s.to_string());
         return;
     }
-    // Hard-split long segment on whitespace; giant single tokens are char-chunked.
     let mut part = String::new();
     for word in s.split_whitespace() {
         let word_len = word.chars().count();
@@ -260,7 +247,6 @@ mod tests {
     #[test]
     fn abbreviations_do_not_split_early() {
         let segs = split_for_tts("Dr. Smith met Mr. Jones on St. Louis Ave. yesterday.");
-        // Prefer fewer segments than one per abbrev period
         assert!(
             segs.len() <= 2,
             "abbreviations should not explode: {segs:?}"
@@ -325,8 +311,6 @@ mod tests {
 
     #[test]
     fn hard_split_nonfinal_gets_terminal_punct() {
-        // Long run with no sentence enders — hard split must leave non-final
-        // chunks with a period so TTS is less likely to invent a tail.
         let words: Vec<&str> = (0..60).map(|_| "word").collect();
         let long = words.join(" ");
         let segs = split_for_tts_with_limit(&long, 80);
@@ -367,7 +351,6 @@ mod tests {
             );
         }
         let rejoined: String = segs.join("");
-        // Non-final hard-split may append a light period; strip for body check.
         let body: String = rejoined.chars().filter(|c| *c == 'x').collect();
         assert_eq!(body.len(), 1000);
     }

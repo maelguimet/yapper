@@ -99,8 +99,6 @@ impl Default for Config {
                 voices_dir: data.join("voices").to_string_lossy().into(),
             },
             paths: PathsConfig {
-                // User install: empty root + XDG venv bin (workers in site-packages).
-                // Dev: `resolve_python_*` falls back to repo `python/` and `.venv`.
                 python_root: String::new(),
                 python_bin: data.join("venv/bin/python").to_string_lossy().into(),
             },
@@ -240,7 +238,6 @@ mod tests {
 
     #[test]
     fn missing_audio_section_defaults() {
-        // Older configs without [audio] must still load.
         let raw = r#"
 [stt]
 model = "small"

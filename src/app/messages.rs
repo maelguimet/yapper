@@ -261,7 +261,6 @@ mod tests {
             tts_loading: false,
         };
         let killed_job = 7u64;
-        // After cancel_tts_pipeline: active_job is None.
         let d = apply_tts_synth_timeout(
             &mut state,
             None,
@@ -284,12 +283,12 @@ mod tests {
             status: "restarting voice…".into(),
             tts_loaded: false,
             tts_model_id: None,
-            tts_loading: true, // load_tts already posted
+            tts_loading: true,
         };
         let prior_job = 11u64;
         let d = apply_tts_synth_timeout(
             &mut state,
-            None, // cancel() cleared active before new job begins
+            None,
             Some(prior_job),
             "synthesize",
             "worker exited during synthesize — cancelled or crashed",
@@ -314,7 +313,7 @@ mod tests {
         let d = apply_tts_synth_timeout(
             &mut state,
             active,
-            Some(4), // old cancelled job
+            Some(4),
             "synthesize",
             "worker exited during synthesize — cancelled or crashed",
         );
@@ -442,7 +441,6 @@ mod tests {
         match stale_ok {
             AppMsg::Transcribed { job_id, intent, text } => {
                 assert!(!is_live_stt_job(live, job_id));
-                // Live session remains HotkeyInsert-owned; stale message ignored.
                 let _ = (intent, text);
                 assert_eq!(live, Some(9));
             }
@@ -487,7 +485,6 @@ mod tests {
         assert!(busy.oob_kill_tts_if_in_flight);
         assert!(busy.oob_kill_all_workers);
         assert!(busy.send_unload_all);
-        // Same OOB condition as Speak restart / Stop mid-synth.
         assert_eq!(
             busy.oob_kill_tts_if_in_flight,
             crate::ui::speak_restart_needs_oob_kill(true)

@@ -17,7 +17,6 @@ fn transport_replay_false_when_file_missing() {
 
 #[test]
 fn wav_duration_from_minimal_pcm() {
-    // 16000 Hz mono 16-bit, 16000 samples = 1.0s
     let samples = 16000usize;
     let mut data = Vec::new();
     data.extend_from_slice(b"RIFF");
@@ -67,7 +66,6 @@ fn clear_last_path_discards_replay() {
     assert!(t.machine.last_path.is_none());
 }
 
-/// Write a short silent mono PCM WAV (16-bit, 16 kHz).
 fn write_silence_wav(path: &Path, duration_secs: f64) {
     let sample_rate = 16_000u32;
     let samples = ((duration_secs * sample_rate as f64).round() as usize).max(160);
@@ -78,8 +76,8 @@ fn write_silence_wav(path: &Path, duration_secs: f64) {
     data.extend_from_slice(b"WAVE");
     data.extend_from_slice(b"fmt ");
     data.extend_from_slice(&16u32.to_le_bytes());
-    data.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    data.extend_from_slice(&1u16.to_le_bytes()); // mono
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
     data.extend_from_slice(&sample_rate.to_le_bytes());
     data.extend_from_slice(&(sample_rate * 2).to_le_bytes());
     data.extend_from_slice(&2u16.to_le_bytes());
@@ -143,20 +141,17 @@ fn enqueue_multi_chunk_uses_one_session_when_mpv_available() {
         "mpv playlist-count should reflect appends, got {playlist}"
     );
 
-    // Pause / resume / seek stay on the same backend.
     t.pause();
     assert_eq!(t.status(), TransportStatus::Paused);
     t.resume();
     assert_eq!(t.status(), TransportStatus::Playing);
     t.seek_secs(0.05);
 
-    // Stop mid-queue: kill backend, idle, no further play of stale queue.
     t.set_pending_queue(false);
     t.stop();
     assert_eq!(t.status(), TransportStatus::Idle);
     assert_eq!(t.files_on_session(), 0);
     assert!(t.backend.is_none());
-    // Stale: ready paths still on disk but transport must not auto-play.
     t.tick();
     assert_eq!(t.status(), TransportStatus::Idle);
 
@@ -185,7 +180,6 @@ fn enqueue_full_playlist_then_replay_full_concat() {
     let session_files = t.files_on_session();
     assert!(session_files >= 2, "session_files={session_files}");
 
-    // Build full-utterance concat (same path finalize_tts_job uses).
     let full = dir.join("full.wav");
     crate::wavutil::concat_wav_files(&paths, &full).unwrap();
     let full_dur = wav_duration_secs(&full).unwrap();
@@ -214,8 +208,6 @@ fn enqueue_full_playlist_then_replay_full_concat() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// After playlist advances past a short chunk, Seek must use the *current*
-/// file duration (not the first WAV). Regression for continuous append path.
 #[test]
 fn multi_chunk_seek_uses_current_item_duration_after_advance() {
     if !which_bin("mpv") {
@@ -239,7 +231,6 @@ fn multi_chunk_seek_uses_current_item_duration_after_advance() {
     assert_eq!(t.files_on_session(), 2);
     assert_eq!(t.status(), TransportStatus::Playing);
 
-    // Wait until mpv has advanced onto B (duration ~2s, not stuck on A ~0.4s).
     let deadline = std::time::Instant::now() + Duration::from_secs(4);
     let mut saw_b = false;
     while std::time::Instant::now() < deadline {
@@ -260,7 +251,6 @@ fn multi_chunk_seek_uses_current_item_duration_after_advance() {
         t.status()
     );
 
-    // Seek into B; must not clamp to A's ~0.4s bound.
     t.seek_secs(1.5);
     let pos = t.machine().position_secs;
     assert!(
@@ -280,8 +270,6 @@ fn multi_chunk_seek_uses_current_item_duration_after_advance() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Host long-read continuity: ≥20 short segments on one mpv session, ordered
-/// enqueue, stop mid-queue (no stale play), full-utterance replay duration.
 #[test]
 fn long_read_twenty_chunks_one_session_stop_and_replay() {
     if !which_bin("mpv") {
@@ -322,7 +310,6 @@ fn long_read_twenty_chunks_one_session_stop_and_replay() {
     );
     assert_eq!(t.status(), TransportStatus::Playing);
 
-    // Mid-run Stop: backend dead, idle, no further audio scheduled.
     t.set_pending_queue(false);
     t.stop();
     assert_eq!(t.status(), TransportStatus::Idle);
@@ -336,7 +323,6 @@ fn long_read_twenty_chunks_one_session_stop_and_replay() {
     );
     eprintln!("stop mid-queue: idle, backend gone");
 
-    // Full replay via concat (same durable path Speak finalize uses).
     let full = dir.join("long-full.wav");
     crate::wavutil::concat_wav_files(&paths, &full).unwrap();
     let full_dur = wav_duration_secs(&full).unwrap();

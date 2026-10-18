@@ -62,7 +62,6 @@ impl YapperApp {
         match stop_recording(session) {
             Ok(path) => {
                 if path.is_file() && path.metadata().map(|m| m.len() > 1000).unwrap_or(false) {
-                    // Intent travels with the job; clear open-mic state before queue.
                     self.recording_intent = RecordingIntent::Idle;
                     self.do_transcribe_file(path, intent);
                 } else {

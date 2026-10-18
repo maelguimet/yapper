@@ -31,7 +31,6 @@ impl YapperApp {
             }
         };
 
-        // Drop previous grabs *before* registering — double-register is the B13 bug.
         let previous_hub = self.hotkeys.take();
         match reregister(
             previous_hub,
@@ -51,7 +50,6 @@ impl YapperApp {
                     previous_live.clone(),
                     Err(format!("{e:#}")),
                 );
-                // Prefer restoring previous working grabs; else leave inactive + error.
                 match reregister(
                     None,
                     &previous_live.read_aloud,
@@ -76,7 +74,6 @@ impl YapperApp {
                         self.status = outcome.status_line().to_string();
                     }
                 }
-                // Never persist drafts on grab failure — live specs unchanged.
             }
         }
     }
@@ -106,7 +103,6 @@ impl YapperApp {
 
     pub(crate) fn hide_to_tray(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-        // Also clear minimized state so Open restores cleanly.
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         self.status = "hidden — tray menu: Open / Quit".into();
     }
@@ -119,13 +115,11 @@ impl YapperApp {
     }
 
     pub(crate) fn arm_hard_quit_and_close(&mut self, ctx: &egui::Context) {
-        // Hide/open must never unload; only HardQuit.
         if !should_unload_on_exit(ShellIntent::HardQuit) {
             return;
         }
         self.hard_quit_armed = true;
         self.discard_all_tts_audio();
-        // Immediate OOB kill so mid-generate cannot block unload; on_exit joins.
         let _ = self.jobs.kill_all_now();
         self.jobs.send(crate::app::messages::JobCmd::UnloadAll);
         self.jobs.send(crate::app::messages::JobCmd::Shutdown);
@@ -144,12 +138,10 @@ impl YapperApp {
 
         if close_req {
             if should_cancel_close(self.hard_quit_armed) {
-                // Always-on product: close button hides, does not exit.
                 let _ = close_request_intent();
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.hide_to_tray(ctx);
             }
-            // else: hard quit armed — allow process exit
             return;
         }
 
@@ -271,7 +263,6 @@ impl YapperApp {
                     "TRAY MISSING — always-on shell is broken without an icon. {e:#}\n{}",
                     tray_failure_hint()
                 ));
-                // Keep retrying every 3s for a while after start.
                 self.tray_retry_at = Some(Instant::now() + Duration::from_secs(3));
             }
         }

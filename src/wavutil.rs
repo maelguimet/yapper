@@ -92,6 +92,8 @@ fn data_payload(bytes: &[u8]) -> Result<&[u8]> {
     bail!("missing data chunk");
 }
 
+const WAV_FORMAT_PCM: u16 = 1;
+
 fn write_pcm_wav(path: &Path, pcm: &[u8], sample_rate: u32, channels: u16, bits: u16) -> Result<()> {
     let byte_rate = sample_rate * u32::from(channels) * u32::from(bits) / 8;
     let block_align = channels * bits / 8;
@@ -104,7 +106,7 @@ fn write_pcm_wav(path: &Path, pcm: &[u8], sample_rate: u32, channels: u16, bits:
     out.extend_from_slice(b"WAVE");
     out.extend_from_slice(b"fmt ");
     out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&WAV_FORMAT_PCM.to_le_bytes());
     out.extend_from_slice(&channels.to_le_bytes());
     out.extend_from_slice(&sample_rate.to_le_bytes());
     out.extend_from_slice(&byte_rate.to_le_bytes());

@@ -44,7 +44,6 @@ VOICES_DIR = Path(
     )
 )
 
-# ≥20 short sentences — multi-chunk monologue for long-read soak.
 MONOLOGUE = " ".join(
     [
         f"Sentence number {i} is part of the yapper long-read soak monologue."
@@ -69,7 +68,6 @@ def nvidia_smi(name: str) -> Path:
         check=False,
     )
     path.write_text(r.stdout + r.stderr, encoding="utf-8")
-    # Also capture used MiB for quick delta
     m = re.search(r"(\d+)\s*MiB\s*/\s*(\d+)\s*MiB", r.stdout)
     if m:
         log(f"nvidia-smi {name}: {m.group(1)} MiB / {m.group(2)} MiB")
@@ -208,13 +206,11 @@ class WorkerSession:
             remaining = deadline - time.time()
             if remaining <= 0:
                 break
-            # Poll in short slices so we notice process death quickly.
             r, _, _ = select.select([self.proc.stdout], [], [], min(remaining, 0.5))
             if not r:
                 continue
             line = self.proc.stdout.readline()
             if line == "":
-                # EOF
                 raise RuntimeError(
                     f"{self.role} closed stdout during {cmd}; see {self.stderr_path}"
                 )
@@ -341,7 +337,6 @@ def soak_tts_long_read_10x() -> None:
             if run == 5:
                 nvidia_smi("tts-mid")
 
-        # Status still healthy after series
         st = tts.request("status", "status", timeout=30)
         assert st["ok"] and st["result"]["loaded"] is True, st
         L(f"post-series status={st['result']}")
@@ -373,14 +368,12 @@ def soak_stop_restart_replay() -> None:
         fh.flush()
 
     segs = split_sentences(MONOLOGUE)
-    # --- Stop mid-generate: kill worker while synthesize is in flight ---
     stop_dir = SCRATCH / "tts-stop"
     stop_dir.mkdir(parents=True, exist_ok=True)
     tts = WorkerSession("tts")
     try:
         r = tts.request("load", "load", {"model": "chatterbox-multilingual", "device": "cuda"}, timeout=300)
         assert r["ok"], r
-        # Synthesize first short chunk cleanly
         p0 = stop_dir / "seg0.wav"
         r0 = tts.request(
             "s0",
@@ -397,8 +390,7 @@ def soak_stop_restart_replay() -> None:
         assert r0["ok"] and wav_ok(p0), r0
         L(f"pre-stop seg0 ok")
 
-        # Start a longer synth in a thread-ish way: fire request then kill mid-flight
-        long_text = " ".join(segs[1:8])  # multi-sentence long enough to be interruptible
+        long_text = " ".join(segs[1:8])
         p_long = stop_dir / "should_abort.wav"
         p_long.unlink(missing_ok=True)
         assert tts.proc.stdin
@@ -417,30 +409,24 @@ def soak_stop_restart_replay() -> None:
         )
         tts.proc.stdin.write(payload + "\n")
         tts.proc.stdin.flush()
-        time.sleep(1.5)  # let GPU work start
+        time.sleep(1.5)
         L(f"sending SIGTERM mid-synth to pid={tts.proc.pid}")
         tts.kill()
-        # Wait a moment; process must be dead; no orphan CUDA context from this worker
         time.sleep(1.0)
         assert tts.proc.poll() is not None, "worker should be dead after stop kill"
         L(f"stop mid-generate: worker dead rc={tts.proc.returncode}")
-        # Cancelled job must not leave a completed long wav that finished after kill
-        # (partial file may exist; full clean complete is the failure mode)
         if p_long.is_file() and wav_ok(p_long):
-            # Accept only if file is tiny/incomplete vs expected multi-sentence length
             L(f"note: partial wav after kill size={p_long.stat().st_size} dur={wav_duration(p_long):.2f}s")
         L("Stop mid-generate PASS (worker killed; no continued session)")
     finally:
         tts.kill()
 
-    # --- Restart mid-generate: new worker + new speak path succeeds ---
     restart_dir = SCRATCH / "tts-restart"
     restart_dir.mkdir(parents=True, exist_ok=True)
     tts2 = WorkerSession("tts")
     try:
         r = tts2.request("load", "load", {"model": "chatterbox-multilingual", "device": "cuda"}, timeout=300)
         assert r["ok"], r
-        # Simulate mid-synth kill of a "prior" job by starting synth and killing quickly
         prior = restart_dir / "prior.wav"
         assert tts2.proc.stdin
         tts2.proc.stdin.write(
@@ -464,7 +450,6 @@ def soak_stop_restart_replay() -> None:
         tts2.kill()
         L("prior mid-synth killed")
 
-        # New speak path on fresh worker — must succeed cleanly (no stale error)
         tts3 = WorkerSession("tts")
         try:
             r = tts3.request("load", "load", {"model": "chatterbox-multilingual", "device": "cuda"}, timeout=300)
@@ -483,7 +468,6 @@ def soak_stop_restart_replay() -> None:
                 timeout=180,
             )
             assert rr["ok"] and wav_ok(out), rr
-            # status must be healthy loaded, not error
             st = tts3.request("st", "status", timeout=30)
             assert st["ok"] and st["result"]["loaded"] is True, st
             L(f"Restart mid-generate PASS status={st['result']} size={out.stat().st_size}")
@@ -495,7 +479,6 @@ def soak_stop_restart_replay() -> None:
     finally:
         tts2.kill()
 
-    # --- Replay full utterance: multi-chunk concat duration ≈ sum ---
     replay_dir = SCRATCH / "tts-replay"
     replay_dir.mkdir(parents=True, exist_ok=True)
     tts4 = WorkerSession("tts")
@@ -584,7 +567,6 @@ def soak_stt_swap_and_file() -> None:
             assert text, f"empty transcript for {model}: {tr}"
             L(f"transcribe {model}: {text!r}")
 
-        # After final small, only one model (small) resident
         st = stt.request("final-status", "status", timeout=30)
         assert st["result"]["model"] == "small"
         assert st["result"]["loaded"] is True
@@ -620,14 +602,12 @@ def soak_unload_all_vram() -> None:
         assert loaded is not None and before is not None
         assert loaded > before + 200, f"expected material VRAM rise: before={before} loaded={loaded}"
 
-        # Unload all (same semantics as workers.unload_all)
         stt.request("u", "unload", timeout=60)
         tts.request("u", "unload", timeout=60)
         st_st = stt.request("ss", "status", timeout=30)
         tt_st = tts.request("ts", "status", timeout=30)
         assert st_st["result"]["loaded"] is False, st_st
         assert tt_st["result"]["loaded"] is False, tt_st
-        # Process still up until shutdown (product may keep process or kill — either ok if VRAM free)
         stt.shutdown_clean()
         tts.shutdown_clean()
         time.sleep(2.0)
@@ -637,7 +617,6 @@ def soak_unload_all_vram() -> None:
         assert not worker_pids("stt"), f"orphan STT workers: {worker_pids('stt')}"
         assert not worker_pids("tts"), f"orphan TTS workers: {worker_pids('tts')}"
         assert after is not None and loaded is not None
-        # Must drop substantially from peak (model-sized footprint gone)
         drop = loaded - after
         log(f"VRAM drop={drop} MiB (loaded={loaded} after={after})")
         assert drop > 500, f"expected large VRAM release, drop={drop} MiB"
@@ -670,7 +649,6 @@ def main() -> int:
         ("stt_swap_file", soak_stt_swap_and_file),
         ("unload_all_vram", soak_unload_all_vram),
     ]
-    # Allow partial runs via YAPPER_SOAK_STEPS=tts_long_read_10x,stt_swap_file
     only = os.environ.get("YAPPER_SOAK_STEPS", "").strip()
     if only:
         wanted = {s.strip() for s in only.split(",") if s.strip()}
@@ -684,7 +662,6 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             log(f"STEP {name} FAIL: {exc}")
             failures.append(f"{name}: {exc}")
-            # Kill any leftover workers so next step has clean GPU
             for role in ("stt", "tts"):
                 for pid in worker_pids(role):
                     try:

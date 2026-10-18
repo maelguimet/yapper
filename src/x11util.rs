@@ -216,7 +216,6 @@ pub fn insert_transcript_at_cursor(text: &str, also_keep_clipboard: bool) -> Res
             if paste_result.is_ok() {
                 return Err(restore_err).context("restore prior CLIPBOARD after insert paste");
             }
-            // Prefer the paste error when both failed.
         }
     }
     paste_result

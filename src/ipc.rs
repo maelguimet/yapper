@@ -88,8 +88,6 @@ impl WorkerClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .env("PYTHONUNBUFFERED", "1");
-        // Empty python_root → rely on interpreter site-packages (self-contained install).
-        // Non-empty → dev checkout or a stable package tree on PYTHONPATH.
         let root = python_root.trim();
         if !root.is_empty() {
             cmd.env("PYTHONPATH", root);
@@ -161,13 +159,10 @@ impl WorkerClient {
         self.stdin.flush()?;
 
         let deadline = std::time::Instant::now() + timeout;
-        // Short poll slices so out-of-band Stop (SIGKILL of child) is noticed
-        // quickly even if the stdout reader is slow to deliver EOF.
         const POLL: Duration = Duration::from_millis(100);
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                // Hard kill so the next call can restart a clean worker.
                 let _ = self.child.kill();
                 let _ = self.child.wait();
                 bail!(
@@ -176,7 +171,6 @@ impl WorkerClient {
                     timeout
                 );
             }
-            // Detect external kill (Stop mid-generate) without waiting full timeout.
             if let Ok(Some(status)) = self.child.try_wait() {
                 bail!(
                     "worker {} exited during {cmd} (status={status}) — cancelled or crashed",
@@ -189,14 +183,12 @@ impl WorkerClient {
                     let resp: Response = serde_json::from_str(&raw)
                         .with_context(|| format!("parse response: {raw}"))?;
                     if resp.id != id {
-                        // Stale/unexpected id — keep reading until ours arrives.
                         continue;
                     }
                     return Ok(resp);
                 }
                 Ok(Err(e)) => bail!("{e}"),
                 Err(RecvTimeoutError::Timeout) => {
-                    // Slice timeout only — loop and re-check deadline + child.
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
@@ -240,7 +232,6 @@ pub fn kill_os_pid(pid: u32) {
     if pid == 0 {
         return;
     }
-    // Prefer direct kill(2) via `kill` binary — always available on target Linux hosts.
     let _ = Command::new("kill")
         .args(["-KILL", &pid.to_string()])
         .stdin(Stdio::null())
@@ -418,10 +409,8 @@ mod tests {
                 .request_timeout("synthesize", HashMap::new(), Duration::from_secs(120))
                 .map_err(|e| format!("{e:#}"));
             *result_bg.lock().unwrap() = Some(r);
-            // Client dropped here — reaps if still needed.
         });
 
-        // Let the blocking request start.
         thread::sleep(Duration::from_millis(50));
         kill_os_pid(pid);
 

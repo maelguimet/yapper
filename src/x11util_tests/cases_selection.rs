@@ -5,7 +5,6 @@ use super::support::{scratch_dir, x11_lock, IsolatedX};
 
 #[test]
 fn super_modifier_query_when_display() {
-    // Read-only query; safe on live DISPLAY (does not steal focus/selection).
     if !display_available() {
         let _iso = match IsolatedX::start() {
             Some(x) => x,
@@ -58,7 +57,6 @@ fn primary_selection_round_trip_when_display() {
     );
 }
 
-/// Select→speak data path: PRIMARY write/read (shipped) + marker for smoke log.
 #[test]
 fn primary_is_readable_for_read_aloud_source() {
     let _guard = x11_lock();

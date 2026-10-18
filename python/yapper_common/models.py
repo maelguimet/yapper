@@ -20,16 +20,14 @@ def ensure_whisper_model(size: str, download_root: Path | None = None) -> Path:
     ensure_runtime_dirs()
     root = download_root or whisper_models_dir()
     root.mkdir(parents=True, exist_ok=True)
-    # Approximate minimum sizes so partial downloads are retried.
-    min_bytes = {"small": 400_000_000, "medium": 1_200_000_000}
+    min_complete_download_bytes = {"small": 400_000_000, "medium": 1_200_000_000}
     target = root / f"{size}.pt"
-    if target.is_file() and target.stat().st_size >= min_bytes.get(size, 1_000_000):
+    if target.is_file() and target.stat().st_size >= min_complete_download_bytes.get(size, 1_000_000):
         return target
 
     import whisper
 
     log.info("downloading whisper %s → %s", size, root)
-    # load_model downloads into download_root; we immediately drop the model
     model = whisper.load_model(size, device="cpu", download_root=str(root))
     del model
     if not target.is_file():

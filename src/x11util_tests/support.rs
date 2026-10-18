@@ -7,7 +7,6 @@ use std::process::{Child, Command as StdCommand, Stdio as ProcStdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Serialize X11 tests (selection is a global resource per display).
 pub(super) fn x11_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -41,7 +40,6 @@ fn which_bin(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Openbox from extracted deb under scratch (no root install).
 fn openbox_bin() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("YAPPER_OPENBOX") {
         let pb = PathBuf::from(p);
@@ -66,7 +64,6 @@ fn openbox_lib_dir() -> Option<PathBuf> {
     }
 }
 
-/// Isolated Xvfb + optional openbox so paste never hits the user session.
 pub(super) struct IsolatedX {
     xvfb: Child,
     wm: Option<Child>,
@@ -80,7 +77,6 @@ impl IsolatedX {
         if !which_bin("Xvfb") || !tools_ok() {
             return None;
         }
-        // Pick a free display (avoid collisions with leftover Xvfb / stale sockets).
         let mut xvfb = None;
         let mut display = String::new();
         for n in 110..300 {
@@ -110,10 +106,9 @@ impl IsolatedX {
                 .spawn()
             {
                 Ok(mut child) => {
-                    // Bind failure exits immediately; only accept live Xvfb.
                     std::thread::sleep(Duration::from_millis(150));
                     match child.try_wait() {
-                        Ok(Some(_)) => continue, // exited
+                        Ok(Some(_)) => continue,
                         Ok(None) if Path::new(&sock).exists() => {
                             display = d;
                             xvfb = Some(child);
@@ -139,7 +134,6 @@ impl IsolatedX {
         let prev_display = std::env::var("DISPLAY").ok();
         let prev_ld = std::env::var("LD_LIBRARY_PATH").ok();
         let prev_home = std::env::var("HOME").ok();
-        // Isolated display for this test only; restored on Drop.
         std::env::set_var("DISPLAY", &display);
 
         // Start openbox when available (EWMH for xdotool windowactivate).
@@ -218,8 +212,6 @@ impl Drop for IsolatedX {
     }
 }
 
-/// Spawn Tk sink, paste via shipped `paste_fn`, assert OUT contains marker.
-/// Writes evidence to `proof_name` under scratch (unique per path to avoid races).
 pub(super) fn assert_injected_via_sink(
     marker: &str,
     proof_name: &str,

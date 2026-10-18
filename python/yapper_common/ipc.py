@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 PROTO = 1
@@ -71,7 +71,3 @@ def loads_request(line: str) -> Request:
     if not isinstance(data, dict):
         raise ValueError("request must be a JSON object")
     return Request.from_dict(data)
-
-
-# silence unused import lint for asdict if helpers grow
-_ = asdict

@@ -44,7 +44,6 @@ fn strips_handle_only_lines() {
 
 #[test]
 fn keeps_french_letters() {
-    // Real do_speak path: sanitize must preserve FR accents, not UTF-8 mojibake.
     let out = sanitize_for_tts("Café déjà vu — très bien. ça va?");
     assert!(
         out.contains("Café"),
@@ -54,7 +53,6 @@ fn keeps_french_letters() {
     assert!(out.contains('ç'), "must keep ç, got {out:?}");
     assert!(out.contains("déjà") || out.contains("deja"), "got {out:?}");
     assert!(out.contains("bien"), "{out}");
-    // Mojibake fingerprints from byte-as-char expansion (pre-fix bug).
     assert!(
         !out.contains('Ã'),
         "UTF-8 mojibake (Ã) must not appear: {out:?}"
@@ -67,13 +65,11 @@ fn keeps_french_letters() {
 
 #[test]
 fn acronym_expand_does_not_corrupt_surrounding_unicode() {
-    // Regression: expand_acronyms used to walk bytes and cast to char.
     let out = sanitize_for_tts("Café TTS déjà");
     assert!(out.contains("Café"), "got {out:?}");
     assert!(out.contains("T T S"), "got {out:?}");
     assert!(out.contains('é'), "got {out:?}");
     assert!(!out.contains('Ã'), "got {out:?}");
-    // Mixed: FR word + EU acronym boundary
     let out2 = sanitize_for_tts("français EU ok");
     assert!(out2.contains('ç') || out2.contains("fran"), "got {out2:?}");
     assert!(out2.contains("E U"), "got {out2:?}");
@@ -82,7 +78,6 @@ fn acronym_expand_does_not_corrupt_surrounding_unicode() {
 
 #[test]
 fn french_lowercase_eu_not_expanded() {
-    // French "eu" (past of avoir) must not become "E U".
     let out = sanitize_for_tts("j'ai eu peur.");
     assert_eq!(out, "j'ai eu peur.");
     assert!(!out.contains("E U"), "lowercase eu must stay: {out}");
@@ -134,7 +129,6 @@ fn parentheticals_become_spoken_pauses_without_losing_content() {
 fn golden_sanitize_fixtures_match_expected() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/sanitize");
     let cases = std::fs::read_to_string(root.join("cases.txt")).expect("cases.txt");
-    // Prefer single shared expected.txt; dual files must match when present.
     let expected = std::fs::read_to_string(root.join("expected.txt"))
         .or_else(|_| std::fs::read_to_string(root.join("expected_rust.txt")))
         .expect("expected fixtures");
@@ -173,7 +167,6 @@ fn urls_become_short_speakable_placeholder() {
 fn standalone_hashtags_dropped_prose_kept() {
     let out = sanitize_for_tts("Love rust #cool #stuff today");
     assert_eq!(out, "Love rust today");
-    // C# is not a leading-hash hashtag token.
     let out2 = sanitize_for_tts("I use C# daily");
     assert!(out2.contains("C#") || out2.contains("C"), "got {out2:?}");
 }
@@ -192,7 +185,6 @@ fn long_unbroken_token_capped() {
             MAX_UNBROKEN_TOKEN_CHARS
         );
     }
-    // Cap inserts spaces; total blob char count preserved.
     let q_count = out.chars().filter(|c| *c == 'q').count();
     assert_eq!(q_count, 1000, "must not drop body chars");
 }

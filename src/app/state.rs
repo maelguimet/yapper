@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 /// Backoff after a failed config save so we do not spam persist every frame.
 const AUTOSAVE_FAIL_BACKOFF: Duration = Duration::from_secs(30);
 
-// Re-export for pipeline/UI modules that historically imported from state.
 pub(crate) use super::messages::RecordingIntent;
 
 /// Post-transcribe follow-up driven by [`RecordingIntent`] (pure; unit-tested).
@@ -155,7 +154,6 @@ impl YapperApp {
         cfg.paths.python_root = resolve_python_root(&cfg).to_string_lossy().into();
         cfg.paths.python_bin = resolve_python_bin(&cfg);
 
-        // Immediate fallback tones — async ListTones refreshes in background.
         let tones = fallback_tones();
 
         let jobs = JobHub::start(cfg.clone());
@@ -360,8 +358,6 @@ impl YapperApp {
             "selection".into()
         };
         self.cfg.audio.mic_source = self.mic_source.clone();
-        // Hotkeys: only live applied specs. Drafts never merge here — Apply is
-        // the sole path that commits drafts into cfg.hotkeys after a successful grab.
         self.cfg.hotkeys = crate::hotkey_apply::hotkeys_persist_payload(
             &self.cfg.hotkeys,
             &self.hotkey_draft_read_aloud,
@@ -387,7 +383,6 @@ mod tests {
 
     #[test]
     fn stt_selected_model_mismatch_not_ready() {
-        // Mirrors UI fields: loaded small, selected medium → must reload.
         assert!(!stt_ready_for_selected(true, Some("small"), "medium"));
         assert!(stt_ready_for_selected(true, Some("medium"), "medium"));
     }
@@ -412,7 +407,6 @@ mod tests {
         let follow = follow_up_after_transcribe(intent, "hello from mic");
         assert_eq!(follow, TranscribeFollowUp::PanelOnly);
         assert_eq!(status_after_transcribe_success(follow), "transcribed");
-        // Copy toggle is orthogonal: panel-only whether text empty or not.
         assert_eq!(
             follow_up_after_transcribe(RecordingIntent::GuiPanel, ""),
             TranscribeFollowUp::PanelOnly
@@ -430,7 +424,6 @@ mod tests {
             status_after_transcribe_success(follow),
             "inserted transcript"
         );
-        // Empty transcription must not paste.
         assert_eq!(
             follow_up_after_transcribe(RecordingIntent::HotkeyInsert, ""),
             TranscribeFollowUp::PanelOnly

@@ -41,7 +41,6 @@ assert_contains() {
   fi
 }
 
-# Restore real have_cmd between mock tests.
 _real_have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -50,7 +49,6 @@ restore_have_cmd() {
   have_cmd() { _real_have_cmd "$1"; }
 }
 
-# --- parse_yapper_models (shipped function) ---------------------------------
 
 echo "== parse_yapper_models =="
 
@@ -97,7 +95,6 @@ fi
 
 unset YAPPER_MODELS || true
 
-# --- HARD_DEPS / OPTIONAL_DEPS table vs README-required tools ---------------
 
 echo "== dep tables cover README hard tools =="
 hard_tools=""
@@ -124,7 +121,6 @@ for tool in mpv ffplay pactl; do
   fi
 done
 
-# Every hard/optional entry must carry a non-empty impact string.
 for entry in "${HARD_DEPS[@]}" "${OPTIONAL_DEPS[@]}"; do
   tool="${entry%%|*}"
   impact="${entry#*|}"
@@ -135,7 +131,6 @@ for entry in "${HARD_DEPS[@]}" "${OPTIONAL_DEPS[@]}"; do
   fi
 done
 
-# --- check_hard_deps / check_optional_deps with mocked have_cmd -------------
 
 echo "== missing hard tool dies with impact =="
 have_cmd() {
@@ -190,7 +185,6 @@ else
   ok "ffplay-missing optional check exits 0"
 fi
 
-# --- structural: install.sh is source-safe ----------------------------------
 
 echo "== source-safe install.sh =="
 if declare -f parse_yapper_models >/dev/null && declare -f check_deps >/dev/null; then
@@ -199,10 +193,8 @@ else
   bad "expected install.sh functions after source"
 fi
 
-# --- dry-run must not write user autostart (shipped prompt_autostart) -------
 
 echo "== dry-run autostart=user does not mutate =="
-# Isolate HOME so a bug cannot touch the real autostart path.
 tmp_home="$(mktemp -d "${TMPDIR:-/tmp}/yapper-autostart-test.XXXXXX")"
 HOME_SAVE="$HOME"
 XDG_C_SAVE="${XDG_CONFIG_HOME:-}"
@@ -238,7 +230,6 @@ DRY_RUN="$DRY_RUN_SAVE"
 if [[ -n "$YAS_SAVE" ]]; then YAPPER_AUTOSTART="$YAS_SAVE"; else unset YAPPER_AUTOSTART; fi
 rm -rf "$tmp_home"
 
-# --- all-users mode is rejected; legacy managed entry is remediated ---------
 
 echo "== system-wide autostart is rejected and remediated =="
 tmp_home="$(mktemp -d "${TMPDIR:-/tmp}/yapper-system-autostart-test.XXXXXX")"
@@ -306,7 +297,6 @@ if [[ -n "$YAS_SAVE" ]]; then YAPPER_AUTOSTART="$YAS_SAVE"; else unset YAPPER_AU
 remove_system_file() { sudo rm -f -- "$1"; }
 rm -rf "$tmp_home"
 
-# --- normal launcher opens; boot autostart starts hidden --------------------
 
 echo "== installed desktop entries distinguish launch from boot =="
 tmp_home="$(mktemp -d "${TMPDIR:-/tmp}/yapper-desktop-test.XXXXXX")"
@@ -343,8 +333,6 @@ else
   ok "user autostart honors custom XDG_CONFIG_HOME"
 fi
 
-# Noninteractive upgrades should repair the exact legacy entry, but no/custom
-# choices must still retain owner intent.
 desktop_entry_contents >"$autostart"
 unset YAPPER_AUTOSTART
 prompt_autostart >/dev/null
@@ -379,7 +367,6 @@ DRY_RUN="$DRY_RUN_SAVE"
 if [[ -n "$YAS_SAVE" ]]; then YAPPER_AUTOSTART="$YAS_SAVE"; else unset YAPPER_AUTOSTART; fi
 rm -rf "$tmp_home"
 
-# --- summary ----------------------------------------------------------------
 
 echo
 echo "install truth tests: $PASS passed, $FAIL failed"

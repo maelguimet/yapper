@@ -4,13 +4,11 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-// Pulse sources, labels, and WAV energy helpers live in `mic`.
 pub use crate::mic::{
     default_pulse_source, human_mic_label, list_capture_sources, list_pulse_sources,
     resolve_mic_source, temp_wav_path, wav_file_energy, wav_level_01, PulseSource,
 };
 
-// Test-facing re-exports (and API stability for callers using audio::).
 #[cfg(test)]
 pub use crate::mic::{
     filter_capture_sources, is_capture_source_name, parse_pactl_sources_short, pcm_s16le_energy,
@@ -42,7 +40,6 @@ impl RecordingSession {
     /// Stop capture, finalize WAV sizes, return output path.
     pub fn stop(mut self) -> Result<PathBuf> {
         stop_child(&mut self.child);
-        // brief flush window for arecord to close the file
         std::thread::sleep(std::time::Duration::from_millis(50));
         finalize_pcm_wav_header(&self.path)?;
         if !self.path.is_file() {
@@ -77,7 +74,6 @@ pub fn start_recording(out: &Path, source: &str) -> Result<RecordingSession> {
         bail!("arecord not found (install alsa-utils for mic capture)");
     }
     let device = arecord_device(source);
-    // Remove stale file so growth starts clean.
     let _ = std::fs::remove_file(out);
     let child = Command::new("arecord")
         .args([
@@ -115,8 +111,7 @@ fn stop_child(child: &mut Child) {
     {
         let pid = child.id();
         if pid > 0 {
-            libc_kill(pid as i32, 2); // SIGINT
-            // If still running shortly after, escalate.
+            libc_kill(pid as i32, SIGINT);
             std::thread::sleep(std::time::Duration::from_millis(80));
             let _ = child.try_wait();
         }
@@ -126,8 +121,10 @@ fn stop_child(child: &mut Child) {
 }
 
 #[cfg(unix)]
+const SIGINT: i32 = 2;
+
+#[cfg(unix)]
 fn libc_kill(pid: i32, sig: i32) {
-    // Avoid libc crate dep: raw kill(2).
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
@@ -155,7 +152,6 @@ pub fn finalize_pcm_wav_header(path: &Path) -> Result<()> {
         if id == b"data" {
             let pcm_len = bytes.len().saturating_sub(data_start);
             bytes[offset + 4..offset + 8].copy_from_slice(&(pcm_len as u32).to_le_bytes());
-            // Update RIFF size again in case we only fixed data.
             let riff_size = (bytes.len() as u32).saturating_sub(8);
             bytes[4..8].copy_from_slice(&riff_size.to_le_bytes());
             std::fs::write(path, &bytes).with_context(|| format!("write {}", path.display()))?;
@@ -174,7 +170,6 @@ pub fn finalize_pcm_wav_header(path: &Path) -> Result<()> {
 pub fn record_probe(out: &Path, source: &str, duration_secs: f32) -> Result<()> {
     let session = start_recording(out, source)?;
     let ms = ((duration_secs.max(0.1)) * 1000.0) as u64;
-    // Hard cap so probes never hang indefinitely.
     let ms = ms.min(10_000);
     std::thread::sleep(std::time::Duration::from_millis(ms));
     session.stop()?;
@@ -193,7 +188,6 @@ pub fn play_wav(path: &Path) -> Result<Child> {
     if !path.is_file() {
         bail!("audio file missing: {}", path.display());
     }
-    // ffplay is common with ffmpeg package; fall back to aplay/paplay
     if which("ffplay") {
         return Command::new("ffplay")
             .args(["-nodisp", "-autoexit", "-loglevel", "quiet"])
@@ -321,9 +315,8 @@ mod tests {
 
     #[test]
     fn wav_bytes_round_trip_energy() {
-        // Minimal mono 16-bit PCM WAV: 4 samples [0, 1000, -1000, 500]
         let samples: [i16; 4] = [0, 1000, -1000, 500];
-        let data = build_wav(&samples, /*bogus_data_size*/ None);
+        let data = build_wav(&samples, None);
         let parsed = pcm_samples_from_wav_bytes(&data).unwrap();
         assert_eq!(parsed, samples);
         let e = pcm_s16le_energy(&parsed);
@@ -335,7 +328,7 @@ mod tests {
         let mut data = Vec::new();
         let data_chunk_size = samples.len() * 2;
         data.extend_from_slice(b"RIFF");
-        data.extend_from_slice(&0u32.to_le_bytes()); // placeholder
+        data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(b"WAVE");
         data.extend_from_slice(b"fmt ");
         data.extend_from_slice(&16u32.to_le_bytes());
@@ -410,7 +403,6 @@ mod tests {
                 return;
             }
         };
-        // Mid-record growth → level helper must see frames (or at least a growing file)
         std::thread::sleep(std::time::Duration::from_millis(400));
         let mid_size = std::fs::metadata(session.path()).map(|m| m.len()).unwrap_or(0);
         assert!(

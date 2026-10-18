@@ -151,12 +151,11 @@ def test_output_sane_long_text_rejects_tiny_clip() -> None:
     text = _long_prose()
     assert len(text) >= 200
     min_needed = min_sane_duration_secs(text)
-    assert min_needed >= 3.0  # word/char floors must be well above "instant"
+    assert min_needed >= 3.0
     sr = 24000
     tiny_secs = 0.25
     tiny = _tone(int(sr * tiny_secs))
     assert not _output_sane(text, tiny_secs, tiny)
-    # Still clearly truncated relative to text length, but above old loose floors.
     short_secs = min(1.5, min_needed * 0.4)
     short = _tone(int(sr * short_secs))
     assert short_secs < min_needed
@@ -164,7 +163,7 @@ def test_output_sane_long_text_rejects_tiny_clip() -> None:
 
 
 def test_output_sane_short_hi_passes() -> None:
-    tone = _tone(24000)  # 1s at 24 kHz
+    tone = _tone(24000)
     assert _output_sane("hi", 1.0, tone)
 
 
@@ -177,7 +176,6 @@ def test_write_wav_nan_safe(tmp_path: Path) -> None:
     cleaned = _to_float_array(arr)
     assert not np.isnan(cleaned).any()
     assert not np.isinf(cleaned).any()
-    # Finite samples + pad; PCM must be readable and finite.
     with wave.open(str(out), "rb") as wf:
         frames = wf.readframes(wf.getnframes())
     pcm = np.frombuffer(frames, dtype=np.int16).astype(np.float32)
@@ -188,7 +186,7 @@ def test_write_wav_nan_safe(tmp_path: Path) -> None:
 
 def test_write_wav_trailing_pad_increases_duration(tmp_path: Path) -> None:
     sr = 24000
-    n = sr  # 1.0s raw
+    n = sr
     tone = _tone(n)
     out = tmp_path / "pad.wav"
     written_secs = _write_wav(out, tone, sr)
@@ -201,7 +199,6 @@ def test_write_wav_trailing_pad_increases_duration(tmp_path: Path) -> None:
         assert wf.getnframes() == n + pad_n
         assert wf.getframerate() == sr
         data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
-    # Tail is silence (pad), head is not.
     assert int(np.max(np.abs(data[-pad_n:]))) == 0
     assert int(np.max(np.abs(data[:n]))) > 0
 
@@ -212,7 +209,7 @@ def test_write_wav_skips_pad_when_near_silent(tmp_path: Path) -> None:
     out = tmp_path / "silent.wav"
     written_secs = _write_wav(out, silent, sr)
     with wave.open(str(out), "rb") as wf:
-        assert wf.getnframes() == sr  # no pad
+        assert wf.getnframes() == sr
     assert abs(written_secs - 1.0) < 1e-6
 
 
@@ -354,13 +351,12 @@ def test_synthesize_retry_updates_gen_ms_and_duration(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Sanity fail then ok: one retry; metadata reflects total work and padded wav."""
-    # Isolate from host Eve assets — worker only needs a stub ref wav path.
     (tmp_path / "eve_neutral.wav").write_bytes(b"RIFF....WAVE")
     monkeypatch.setenv("YAPPER_VOICES_DIR", str(tmp_path))
     monkeypatch.delenv("YAPPER_TTS_CLONE", raising=False)
     text = _long_prose()
     sr = 24000
-    bad = _tone(int(sr * 0.2))  # too short for long text
+    bad = _tone(int(sr * 0.2))
     good_secs = max(min_sane_duration_secs(text) + 0.5, 6.0)
     good = _tone(int(sr * good_secs))
     model = _ScriptedModel([bad, good], delay_s=0.02)
@@ -385,7 +381,6 @@ def test_synthesize_retry_updates_gen_ms_and_duration(
     assert model.calls == 2
     assert out.is_file()
     gen_ms = float(resp.result["gen_ms"])
-    # Two generate calls each slept 20ms → well above single-attempt floor.
     assert gen_ms >= 30.0
     pad_n = trailing_pad_samples(sr)
     expected_dur = good_secs + (pad_n / float(sr))

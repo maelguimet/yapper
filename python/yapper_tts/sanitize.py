@@ -16,7 +16,6 @@ from __future__ import annotations
 import re
 import unicodedata
 
-# B21 social/X fixture (must not crash pipeline).
 B21_SOCIAL_FIXTURE = """ILIAS ISM
 @illyism
 This doesn't work in EU btw 🫡
@@ -27,10 +26,8 @@ The permanent EUnderclass is already here 🇪🇺"""
 
 B25_TTS_FIXTURE = "This is a test. Does the TTS work?"
 
-# French lowercase fixture — `eu` must not expand.
 FRENCH_EU_FIXTURE = "j'ai eu peur."
 
-# Max Unicode code points per unbroken token (aligned with Rust).
 MAX_UNBROKEN_TOKEN_CHARS = 80
 URL_PLACEHOLDER = "link"
 
@@ -38,7 +35,6 @@ _HANDLE_ONLY = re.compile(r"^@\w+$")
 _HANDLE_INLINE = re.compile(r"@\w+")
 _HASHTAG_TOKEN = re.compile(r"^#\w+$")
 _URL_TRAIL_PUNCT = frozenset(".,;:!?)]'\"»")
-# Explicit list: do not spell every uppercase word (for example, names such as ILIAS).
 _ACRONYMS = (
     (re.compile(r"\bRLHF\b"), "R L H F"),
     (re.compile(r"\bVRAM\b"), "V R A M"),
@@ -55,7 +51,7 @@ _ACRONYMS = (
     (re.compile(r"\bML\b"), "M L"),
     (re.compile(r"\bUI\b"), "U I"),
     (re.compile(r"\bUX\b"), "U X"),
-    (re.compile(r"\bEU\b"), "E U"),  # no IGNORECASE — preserve French "eu"
+    (re.compile(r"\bEU\b"), "E U"),
 )
 _MULTI_WS = re.compile(r"\s+")
 
@@ -79,7 +75,6 @@ def _sanitize_line(line: str) -> str:
         return ""
     if _HANDLE_ONLY.match(trimmed):
         return ""
-    # Drop @handles inline
     s = _HANDLE_INLINE.sub("", trimmed)
     s = _replace_urls(s)
     s = "".join(ch for ch in s if _keep_char(ch))
@@ -101,8 +96,6 @@ def _normalize_parenthetical_pauses(s: str) -> str:
 
     for i, ch in enumerate(chars):
         if ch == "(":
-            # Whitespace-delimited parentheses are prose asides. Preserve
-            # attached pairs such as main() and println!(...) as code.
             normalize = i == 0 or chars[i - 1].isspace()
             normalized_stack.append(normalize)
             if not normalize:
@@ -202,19 +195,16 @@ def _cap_unbroken_tokens(s: str, max_len: int) -> str:
 def _keep_char(ch: str) -> bool:
     if ch.isascii():
         return not ch.isspace() or ch == " " or ch == "\t"
-    # Keep letters/numbers (FR accents); drop emoji/symbols broadly.
     cat = unicodedata.category(ch)
     if cat.startswith("L") or cat.startswith("N"):
         return True
     if ch in "’‘“”–—…«»€£":
         return True
-    # Drop So/Sk/Cf emoji-ish and marks used only for emoji composition.
     if cat in {"So", "Sk", "Cf", "Cs", "Co"}:
         return False
     if cat.startswith("M"):
-        # Keep combining accents on Latin letters
         return True
-    return cat.startswith("P")  # punctuation
+    return cat.startswith("P")
 
 
 __all__ = [

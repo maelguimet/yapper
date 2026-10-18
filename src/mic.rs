@@ -62,7 +62,6 @@ pub fn human_mic_label(name: &str) -> String {
     const DROP: &[&str] = &[
         "mono", "fallback", "analog", "stereo", "iec958", "hdmi", "output",
         "input", "audio", "device", "usb", "pci", "pipewire", "alsa",
-        // Corporate noise from USB product strings
         "ltd", "co", "inc", "corp", "llc", "gmbh", "sa", "bv",
     ];
     parts.retain(|p| {
@@ -91,7 +90,6 @@ pub fn human_mic_label(name: &str) -> String {
                     && (t.chars().any(|c| c.is_ascii_digit()) || t.len() >= 3)
             })
             .collect();
-        // Prefer brand/model tokens (e.g. TONOR + TC30) over USB vendor strings.
         let productish: Vec<&str> = interesting
             .iter()
             .copied()
@@ -104,7 +102,6 @@ pub fn human_mic_label(name: &str) -> String {
             })
             .collect();
         if !productish.is_empty() {
-            // Cap at last 3 product tokens so "TONOR TC30" not full vendor path.
             let start = productish.len().saturating_sub(3);
             productish[start..].join(" ")
         } else if interesting.len() >= 2 {
@@ -253,7 +250,6 @@ pub fn pcm_samples_from_wav_bytes(bytes: &[u8]) -> Result<Vec<i16>> {
             data_range = Some((data_start, data_end));
             break;
         }
-        // chunks are word-aligned
         offset = data_end + (chunk_size % 2);
         if chunk_size == 0 {
             break;
@@ -271,7 +267,6 @@ pub fn pcm_samples_from_wav_bytes(bytes: &[u8]) -> Result<Vec<i16>> {
     if pcm.len() < 2 {
         return Ok(Vec::new());
     }
-    // Drop trailing odd byte if present (incomplete write while recording).
     let usable = pcm.len() - (pcm.len() % 2);
     let mut samples = Vec::with_capacity(usable / 2);
     for i in (0..usable).step_by(2) {

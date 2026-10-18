@@ -12,7 +12,6 @@ impl YapperApp {
         if self.stt_loading {
             return;
         }
-        // Always load the *selected* model (may differ from currently loaded).
         self.stt_loading = true;
         self.status = format!("loading dictation model {}…", self.stt_model);
         self.jobs.send(JobCmd::LoadStt {
@@ -54,7 +53,6 @@ impl YapperApp {
         let plan = plan_unload_all(synth_in_flight);
         debug_assert!(plan.stop_playback && plan.cleanup_chunks && plan.send_unload_all);
 
-        // Discard stops transport and clears chunk temps (cleanup_chunks).
         self.discard_all_tts_audio();
         if plan.oob_kill_tts_if_in_flight || speak_restart_needs_oob_kill(synth_in_flight) {
             let _ = self.jobs.kill_tts_now();
@@ -78,7 +76,6 @@ impl YapperApp {
 
     /// Queue a transcribe with a fresh job_id + intent (file pick uses Idle).
     pub(crate) fn do_transcribe_file(&mut self, path: PathBuf, intent: RecordingIntent) {
-        // Honor Settings selector: if wrong size is loaded, reload first.
         if !self.stt_ready_for_selected_model() {
             self.pending_transcribe = Some((path, intent));
             self.load_stt();

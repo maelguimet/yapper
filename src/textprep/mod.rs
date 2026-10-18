@@ -126,7 +126,6 @@ fn match_url_at(chars: &[char], i: usize) -> Option<usize> {
     while j < chars.len() && !chars[j].is_whitespace() {
         j += 1;
     }
-    // Leave sentence punctuation outside the URL match.
     while j > i + scheme_len {
         let prev = chars[j - 1];
         if matches!(prev, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '\'' | '"' | '»') {
@@ -204,7 +203,6 @@ fn keep_char(c: char) -> bool {
     if c.is_ascii() {
         return !c.is_control() || c == '\t';
     }
-    // Letters (incl. FR accents) and numbers
     if c.is_alphanumeric() {
         return true;
     }
@@ -293,12 +291,10 @@ fn match_acronym_at<'a>(
         }
         let slice = &chars[i..i + n];
         let matched = match case_rule {
-            AcronymCase::UpperOnly => {
-                // Token must equal the uppercase form exactly (ASCII).
-                acr.chars()
-                    .enumerate()
-                    .all(|(j, a)| slice[j].is_ascii() && slice[j] == a)
-            }
+            AcronymCase::UpperOnly => acr
+                .chars()
+                .enumerate()
+                .all(|(j, a)| slice[j].is_ascii() && slice[j] == a),
             AcronymCase::AnyCase => acr.chars().enumerate().all(|(j, a)| {
                 let c = slice[j];
                 c.is_ascii() && a.to_ascii_uppercase() == c.to_ascii_uppercase()
@@ -307,7 +303,6 @@ fn match_acronym_at<'a>(
         if !matched {
             continue;
         }
-        // Left/right boundaries are Unicode-aware so accented letters count as word chars.
         if i > 0 && chars[i - 1].is_alphanumeric() {
             continue;
         }

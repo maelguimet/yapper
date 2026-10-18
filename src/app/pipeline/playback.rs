@@ -13,8 +13,6 @@ impl YapperApp {
             status,
             TransportStatus::Idle | TransportStatus::Buffering
         );
-        // While speaking/paused on mpv IPC, append ready chunks to the live playlist
-        // instead of waiting for end-of-file + respawn.
         let can_append = matches!(status, TransportStatus::Playing | TransportStatus::Paused)
             && self.transport.can_append();
         if !can_start && !can_append {
@@ -30,7 +28,6 @@ impl YapperApp {
             }
             return;
         }
-        // Drain ready into one persistent player session (start once, then append).
         while !self.tts.ready.is_empty() {
             let still_start = matches!(
                 self.transport.status(),
@@ -57,7 +54,6 @@ impl YapperApp {
             }
         }
         self.update_speak_status();
-        // Keep prebuffer full while playing.
         self.pump_tts_synth();
     }
 
@@ -72,7 +68,6 @@ impl YapperApp {
             &time,
             self.tts.synth_in_flight,
         );
-        // Keep controller progress_label wired for N/M when playing_index lags.
         let prog = self.tts.progress_label();
         if !prog.is_empty() && self.tts.active_job.is_some() && !line.contains(&prog) {
             line = format!("{line} · {prog}");
@@ -90,13 +85,11 @@ impl YapperApp {
         if !matches!(self.transport.status(), TransportStatus::Idle) {
             return;
         }
-        // Build full-utterance WAV for Replay.
         let paths = self.tts.chunk_paths.clone();
         if !paths.is_empty() {
             let out = temp_wav_path("tts-full");
             match concat_wav_files(&paths, &out) {
                 Ok(()) => {
-                    // Drop intermediate chunks; keep full only.
                     for p in &paths {
                         if p != &out {
                             let _ = std::fs::remove_file(p);
@@ -107,7 +100,6 @@ impl YapperApp {
                     self.transport.remember_path(out);
                 }
                 Err(e) => {
-                    // Fallback: last chunk only.
                     if let Some(last) = paths.last() {
                         self.tts_last_full_path = Some(last.clone());
                         self.transport.remember_path(last.clone());
@@ -126,7 +118,6 @@ impl YapperApp {
 
     pub(crate) fn poll_transport(&mut self) {
         self.transport.tick();
-        // Idle/buffering: start; playing/paused: append ready chunks to live playlist.
         match self.transport.status() {
             TransportStatus::Idle | TransportStatus::Buffering => {
                 self.try_play_next_ready();

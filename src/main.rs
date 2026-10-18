@@ -101,7 +101,6 @@ fn run_doctor() -> anyhow::Result<()> {
     cfg.paths.python_root = resolve_python_root(&cfg).to_string_lossy().into();
     cfg.paths.python_bin = resolve_python_bin(&cfg);
 
-    // Prefer config [models] paths (what workers actually use); fall back to XDG data.
     let models_root = if cfg.models.dir.trim().is_empty() {
         data.join("models")
     } else {
@@ -171,7 +170,6 @@ fn run_doctor() -> anyhow::Result<()> {
         );
     }
 
-    // Tree under python_root and/or importable via python_bin site-packages.
     println!(
         "  yapper_stt package: {}",
         worker_package_status(&cfg.paths.python_bin, &cfg.paths.python_root, "yapper_stt")
@@ -222,7 +220,6 @@ fn run_doctor() -> anyhow::Result<()> {
 
     doctor_mic_probe(&cfg);
 
-    // Worker ping smoke (no model load); path env matches GUI WorkerManager.
     match crate::ipc::WorkerClient::spawn(
         "stt",
         &cfg.paths.python_bin,

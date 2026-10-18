@@ -43,7 +43,6 @@ impl DualModelPolicy {
         let slot = self.slot_mut(role);
         slot.loaded = false;
         slot.model_id = None;
-        // keep last_used for history? clear for simplicity
         slot.last_used = None;
     }
 
@@ -134,11 +133,9 @@ mod tests {
         p.mark_loaded(Role::Stt, "small");
         thread::sleep(Duration::from_millis(5));
         p.mark_loaded(Role::Tts, "chatterbox-multilingual");
-        // STT is older
         assert_eq!(p.lru_to_unload(), Some(Role::Stt));
         p.touch(Role::Stt);
         thread::sleep(Duration::from_millis(5));
-        // TTS is older now
         assert_eq!(p.lru_to_unload(), Some(Role::Tts));
     }
 

@@ -68,7 +68,6 @@ impl TtsController {
     }
 
     pub fn cancel(&mut self) {
-        // Bump generation so stale chunks are ignored; clear queues.
         let _ = self.next_job_id();
         self.active_job = None;
         self.pending.clear();
@@ -77,7 +76,6 @@ impl TtsController {
         self.total = 0;
         self.finished = true;
         self.playing_index = None;
-        // Keep chunk_paths for possible partial replay handled by caller.
     }
 
     pub fn is_live(&self, job_id: u64) -> bool {
@@ -150,7 +148,6 @@ impl TtsController {
             self.pending.push_front(retry.clone());
             return Some(retry);
         }
-        // Skipped after max retries.
         self.check_finished();
         None
     }
@@ -216,10 +213,8 @@ mod tests {
         assert!(!c.should_request_synth());
         assert!(c.on_chunk_ready(id, 0, "a".into(), PathBuf::from("/a"), 1.0));
         assert!(c.on_chunk_ready(id, 1, "b".into(), PathBuf::from("/b"), 1.0));
-        // ready has 2; pending still has c but cap blocks until pop
         assert_eq!(c.ready.len(), 2);
         assert!(!c.should_request_synth() || c.ready.len() >= MAX_READY_CHUNKS);
-        // After fixing: synth_in_flight false, ready==2 → should NOT request
         assert!(!c.should_request_synth());
         let _ = c.pop_ready();
         assert!(c.should_request_synth());
@@ -235,7 +230,6 @@ mod tests {
         assert_eq!(c.pending.front().unwrap().retries, 1);
         c.mark_synth_started();
         assert!(c.on_chunk_failed(id, 0).is_none());
-        // skipped; next is "ok"
         assert_eq!(c.pending.front().unwrap().text, "ok");
     }
 

@@ -149,7 +149,6 @@ pub fn pump_gtk_events() {
             }
             GTK_READY.store(true, Ordering::Relaxed);
         }
-        // Drain pending events without blocking the egui frame.
         for _ in 0..32 {
             if !gtk::events_pending() {
                 break;
@@ -242,22 +241,13 @@ fn which_lib(name: &str) -> bool {
 
 /// Load icon from assets if present, else procedural RGBA.
 fn load_tray_icon() -> Icon {
-    if let Some(icon) = try_load_png_icon() {
+    if let Some(icon) = try_load_raw_rgba_icon() {
         return icon;
     }
     procedural_icon()
 }
 
-fn try_load_png_icon() -> Option<Icon> {
-    // Prefer installed / repo assets. PNG via image crate is optional — we ship a
-    // simple raw RGBA file generator as fallback. For v0.2 we embed procedural
-    // monochrome-friendly icon; if assets/yapper-tray.rgba exists (w h rgba…), load it.
-    let candidates = [
-        Path::new("assets/yapper-tray.png"),
-        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/yapper-tray.png")),
-    ];
-    // Without an image decoder dep, only accept raw RGBA dump: 8-byte header
-    // (width u32 LE, height u32 LE) + RGBA pixels. Written by scripts or tests.
+fn try_load_raw_rgba_icon() -> Option<Icon> {
     let raw_candidates = [
         Path::new("assets/yapper-tray.rgba"),
         Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/yapper-tray.rgba")),
@@ -267,7 +257,6 @@ fn try_load_png_icon() -> Option<Icon> {
             return Some(icon);
         }
     }
-    let _ = candidates; // reserved for image-crate path later
     None
 }
 
@@ -321,7 +310,7 @@ pub fn build_mic_icon_rgba(size: u32) -> Vec<u8> {
     let s = size as i32;
     let cx = s / 2;
     let cy = s / 2;
-    let r_outer = (s * 15) / 32; // filled disc
+    let r_outer = (s * 15) / 32;
     let r2 = r_outer * r_outer;
     for y in 0..s {
         for x in 0..s {
@@ -332,12 +321,10 @@ pub fn build_mic_icon_rgba(size: u32) -> Vec<u8> {
             if dist2 > r2 {
                 continue;
             }
-            // Soft edge: full blue disc
             rgba[i] = 70;
             rgba[i + 1] = 150;
             rgba[i + 2] = 255;
             rgba[i + 3] = 255;
-            // Mic body (darker blue / white-ish capsule for contrast)
             let mic_cx = 0;
             let mic_cy = -s / 16;
             let mdx = dx - mic_cx;
