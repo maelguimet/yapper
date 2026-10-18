@@ -1,0 +1,105 @@
+#!/bin/sh
+# Blocks files over the size cap: about 5,000 tokens, counted as bytes / 4.
+#
+#   scripts/check-file-size            check staged files (the pre-commit hook)
+#   scripts/check-file-size --all      check every tracked file (CI)
+#   scripts/check-file-size --list     print current offenders in baseline format
+#
+# Files listed in .file-size-baseline ("<bytes> <path>") were over the cap when
+# the check was introduced. They may shrink but not grow. Every other file must
+# stay under the cap. Lockfiles, binary assets, and files marked
+# linguist-generated or linguist-vendored in .gitattributes are exempt.
+
+set -eu
+
+MAX_BYTES=${FILE_SIZE_MAX_BYTES:-20000}
+BASELINE=.file-size-baseline
+
+cd "$(git rev-parse --show-toplevel)"
+
+mode=staged
+case "${1:-}" in
+  "") ;;
+  --all) mode=all ;;
+  --list) mode=list ;;
+  *) echo "usage: $0 [--all|--list]" >&2; exit 2 ;;
+esac
+
+exempt() {
+  case "${1##*/}" in
+    Cargo.lock | package-lock.json | npm-shrinkwrap.json | pnpm-lock.yaml | yarn.lock | \
+    bun.lock | bun.lockb | poetry.lock | uv.lock | Pipfile.lock | Gemfile.lock | \
+    composer.lock | go.sum | flake.lock | *.lock) return 0 ;;
+  esac
+  case "$1" in
+    *.png | *.jpg | *.jpeg | *.gif | *.webp | *.ico | *.icns | *.bmp | *.svg | *.pdf | \
+    *.woff | *.woff2 | *.ttf | *.otf | *.mp3 | *.mp4 | *.wav | *.ogg | *.flac | *.webm | \
+    *.onnx | *.bin | *.wasm | *.zip | *.gz | *.tgz | *.xz | *.zst | *.tar | *.min.js | \
+    *.min.css | *.map) return 0 ;;
+  esac
+  # Generated, vendored or binary by .gitattributes.
+  attrs=$(git check-attr linguist-generated linguist-vendored binary diff -- "$1")
+  case "$attrs" in
+    *"linguist-generated: set"* | *"linguist-generated: true"* | \
+    *"linguist-vendored: set"* | *"linguist-vendored: true"* | \
+    *"binary: set"* | *"diff: unset"*) return 0 ;;
+  esac
+  # Binary content: a NUL byte in the first 8 KB, as git itself decides.
+  [ "$(git cat-file blob ":$1" | head -c 8000 | tr -d '\000' | wc -c)" -ne \
+    "$(git cat-file blob ":$1" | head -c 8000 | wc -c)" ]
+}
+
+baseline_size() {
+  [ -f "$BASELINE" ] || return 1
+  awk -v path="$1" '
+    /^[[:space:]]*(#|$)/ { next }
+    { size = $1; sub(/^[^ ]+ /, ""); if ($0 == path) { print size; found = 1; exit } }
+    END { exit found ? 0 : 1 }
+  ' "$BASELINE"
+}
+
+tokens() { echo $(( $1 / 4 )); }
+
+files() {
+  if [ "$mode" = staged ]; then
+    git diff --cached --name-only --diff-filter=ACMR
+  else
+    git ls-files
+  fi
+}
+
+failed=0
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+files > "$tmp"
+while IFS= read -r path; do
+  [ -n "$path" ] || continue
+  git cat-file -e ":$path" 2>/dev/null || continue
+  size=$(git cat-file -s ":$path")
+  [ "$size" -gt "$MAX_BYTES" ] || continue
+  exempt "$path" && continue
+  if [ "$mode" = list ]; then
+    echo "$size $path"
+    continue
+  fi
+  if allowed=$(baseline_size "$path"); then
+    [ "$size" -le "$allowed" ] && continue
+    echo "file-size: $path grew to $size bytes (~$(tokens "$size") tokens); its baseline is $allowed bytes." >&2
+  else
+    echo "file-size: $path is $size bytes (~$(tokens "$size") tokens), over the $MAX_BYTES-byte (~$(tokens "$MAX_BYTES")-token) cap." >&2
+  fi
+  failed=1
+done < "$tmp"
+
+if [ "$failed" -ne 0 ]; then
+  cat >&2 <<MSG
+
+Split the file so each part stays under $MAX_BYTES bytes:
+  - by responsibility: move each cohesive concern into its own module;
+  - move tests into a separate file next to the code they test;
+  - extract large data, fixtures or templates into their own files.
+Files in $BASELINE may shrink but not grow. Lockfiles, binary assets, and
+files marked linguist-generated or linguist-vendored in .gitattributes are exempt.
+MSG
+  exit 1
+fi

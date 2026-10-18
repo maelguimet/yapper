@@ -1,0 +1,17 @@
+name: File size
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  file-size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-file-size.test.sh
+      - run: scripts/check-file-size --all

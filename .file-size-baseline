@@ -1,0 +1,3 @@
+# Files over the 20,000-byte cap when scripts/check-file-size was added.
+# Each may shrink but not grow past the size recorded here (bytes path).
+25129 scripts/gpu_soak.py
