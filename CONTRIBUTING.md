@@ -36,7 +36,7 @@ By contributing, you agree your contributions are licensed under the MIT license
 
 ## File-size cap
 
-Each file stays under about 5,000 tokens, counted as 20,000 bytes. CI is the gate: the File size workflow runs `scripts/check-file-size --all` on every push and pull request, and on pull requests it also rejects new or raised `.file-size-baseline` entries and new size exemptions in `.gitattributes`. The pre-commit hook runs the same check on staged files before CI does. Enable it once per clone:
+Each file stays under about 5,000 tokens, counted as 20,000 bytes. CI is the gate: the File size workflow runs `scripts/check-file-size --all` on every push and pull request. On pull requests it runs the base branch's copy of the script, and also rejects new or raised `.file-size-baseline` entries and any over-cap file that is exempt through `.gitattributes` but was not an exempt file on the base branch, including a new file under an existing exemption. Narrowing an exemption passes. The pre-commit hook runs the same check on staged files before CI does. Enable it once per clone:
 
 ```sh
 git config core.hooksPath .githooks

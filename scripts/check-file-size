@@ -12,7 +12,9 @@
 # may only be removed or lowered. Exempt: lockfiles by name, binary content (a
 # NUL byte in the first 8,000 bytes, git's own test), and paths marked
 # linguist-generated, linguist-vendored, binary or -diff in .gitattributes.
-# Any lookup that fails counts as a failure.
+# With --against, an over-cap path exempted through .gitattributes must also
+# have been an exempt file at R. Any lookup that fails counts as a failure.
+# Needs git 2.40 or later for check-attr --source.
 
 set -eu
 
@@ -36,24 +38,32 @@ self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 top=$(git rev-parse --show-toplevel) || die "not inside a git work tree"
 cd "$top"
 
-# The value git reports for one attribute of a path, read from the index.
+# The value git reports for attribute $2 of path $3, with $1 either --cached
+# or --source=<ref>.
 attr() {
-  out=$(git check-attr --cached "$1" -- "$2") || die "git check-attr failed for $2"
+  out=$(git check-attr "$1" "$2" -- "$3") || die "git check-attr $1 failed for $3"
   printf '%s\n' "${out##*: }"
 }
 
-exempt() {
+attr_exempt() {
+  case "$(attr "$1" linguist-generated "$2")" in set | true) return 0 ;; esac
+  case "$(attr "$1" linguist-vendored "$2")" in set | true) return 0 ;; esac
+  [ "$(attr "$1" binary "$2")" = set ] && return 0
+  [ "$(attr "$1" diff "$2")" = unset ]
+}
+
+lockfile_or_binary() {
   name=${1##*/}
   for lock in $LOCKFILES; do
     [ "$name" = "$lock" ] && return 0
   done
-  case "$(attr linguist-generated "$1")" in set | true) return 0 ;; esac
-  case "$(attr linguist-vendored "$1")" in set | true) return 0 ;; esac
-  [ "$(attr binary "$1")" = set ] && return 0
-  [ "$(attr diff "$1")" = unset ] && return 0
   nul=$(git cat-file blob ":0:$1" | head -c 8000 | tr -dc '\000' | wc -c) ||
     die "cannot read the staged content of $1"
   [ "$nul" -gt 0 ]
+}
+
+exempt() {
+  lockfile_or_binary "$1" || attr_exempt --cached "$1"
 }
 
 baseline_size() {
@@ -87,12 +97,28 @@ check_file() {
   return 1
 }
 
-# Baseline entries may only shrink or disappear, and .gitattributes may not
-# gain exemptions, between <ref> and the index.
+# Run by xargs: exit 1 if a file is over the cap and exempt through
+# .gitattributes, but was not an exempt file at <ref>.
+check_exemption() {
+  ref=$1
+  path=$2
+  size=$(git cat-file -s ":0:$path") || die "cannot read the staged size of $path"
+  [ "$size" -gt "$MAX_BYTES" ] || return 0
+  lockfile_or_binary "$path" && return 0
+  attr_exempt --cached "$path" || return 0
+  if git cat-file -e "$ref:$path" 2>/dev/null && attr_exempt "--source=$ref" "$path"; then
+    return 0
+  fi
+  echo "file-size: $path is $size bytes (~$(tokens "$size") tokens) and exempt through .gitattributes, but was not an exempt file at $ref." >&2
+  return 1
+}
+
+# Baseline entries may only shrink or disappear, and over-cap paths may not
+# become exempt through .gitattributes, between <ref> and the index.
 check_against() {
   ref=$1
   git rev-parse --verify --quiet "$ref^{commit}" >/dev/null || die "unknown ref $ref"
-  if ! git cat-file -e "$ref:${self#"$top"/}" 2>/dev/null; then
+  if ! git cat-file -e "$ref:scripts/check-file-size" 2>/dev/null; then
     echo "file-size: $ref predates this check; the baseline and exemptions it adds are reviewed in this change." >&2
     return 0
   fi
@@ -111,15 +137,7 @@ check_against() {
     END { exit bad }
   ' "$before" "$after" >&2 || status=1
   rm -f "$before" "$after"
-  added=$(git diff --cached --no-color --no-ext-diff -U0 "$ref" -- ':(glob).gitattributes' ':(glob)**/.gitattributes') ||
-    die "cannot diff .gitattributes against $ref"
-  exemptions=$(printf '%s\n' "$added" | grep -E '^\+[^+]' |
-    grep -E '(^|[[:space:]])(linguist-generated|linguist-vendored)(=true)?([[:space:]]|$)|(^|[[:space:]])(binary|-diff)([[:space:]]|$)' || true)
-  if [ -n "$exemptions" ]; then
-    echo "file-size: .gitattributes gains size-check exemptions since $ref:" >&2
-    printf '%s\n' "$exemptions" | sed 's/^+/  /' >&2
-    status=1
-  fi
+  git ls-files -z | xargs -0 "$self" --exemption "$ref" || status=1
   return "$status"
 }
 
@@ -129,7 +147,19 @@ case "${1:-}" in
   --all) mode=all ;;
   --list) mode=list ;;
   --against) [ $# -eq 2 ] && [ -n "$2" ] || usage; check_against "$2"; exit ;;
-  --file) [ $# -eq 3 ] || usage; check_file "$2" "$3"; exit ;;
+  --file)
+    [ $# -le 3 ] && [ $# -ge 2 ] || usage
+    [ $# -eq 2 ] || check_file "$2" "$3"
+    exit
+    ;;
+  --exemption)
+    [ $# -ge 2 ] || usage
+    ref=$2
+    shift 2
+    status=0
+    for path; do check_exemption "$ref" "$path" || status=1; done
+    exit "$status"
+    ;;
   *) usage ;;
 esac
 [ $# -le 1 ] || usage
@@ -162,7 +192,8 @@ Split the file so each part stays under $MAX_BYTES bytes:
 Files in $BASELINE may shrink but not grow, and its entries may only be
 lowered or removed. Lockfiles, binary content, and paths marked
 linguist-generated, linguist-vendored, binary or -diff in .gitattributes are
-exempt; new exemptions are rejected here and in CI.
+exempt; an over-cap file that was not exempt at the base is rejected here and
+in CI, including a new file under an existing exemption.
 MSG
 fi
 exit "$failed"

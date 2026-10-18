@@ -5,6 +5,7 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 script=$here/check-file-size
 hook=$here/../.githooks/pre-commit
+workflow=$here/../.github/workflows/file-size.yml
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cd "$work"
@@ -114,7 +115,7 @@ rm staged.rs
 
 commit base
 
-case="generated and vendored paths committed earlier"
+case="a new over-cap file under an existing exemption"
 mkdir gen vendor
 printf 'gen/** linguist-generated\nvendor/** linguist-vendored\n' >.gitattributes
 git add .gitattributes
@@ -122,8 +123,18 @@ commit attrs
 big 50000 gen/out.rs
 big 50000 vendor/lib.rs
 git add gen vendor
-pass
+fail
+expect "gen/out.rs is 50000 bytes (~12500 tokens) and exempt through .gitattributes, but was not an exempt file at HEAD"
+expect "vendor/lib.rs is 50000 bytes"
+pass --all
 commit generated
+
+case="generated and vendored paths committed earlier may grow"
+big 60000 gen/out.rs
+big 60000 vendor/lib.rs
+git add gen vendor
+pass
+git reset -q --hard
 
 case="uncommitted .gitattributes does not exempt"
 printf 'gen/** linguist-generated\nvendor/** linguist-vendored\nbig/** linguist-generated\n' >.gitattributes
@@ -136,8 +147,7 @@ expect "big/file.rs is 50000 bytes"
 case="staged .gitattributes exemption is rejected"
 git add .gitattributes
 fail
-expect ".gitattributes gains size-check exemptions since HEAD"
-expect "big/** linguist-generated"
+expect "big/file.rs is 50000 bytes (~12500 tokens) and exempt through .gitattributes, but was not an exempt file at HEAD"
 git reset -q
 git checkout -q -- .gitattributes
 rm -rf big
@@ -223,6 +233,103 @@ commit_empty pre
 git checkout -q -f master
 pass --against pre-check
 expect "pre-check predates this check"
+
+case="--against: renaming the script does not skip the base check"
+git checkout -q -b renamed
+git mv scripts/check-file-size scripts/size-check
+printf '# bytes path\n80000 legacy.rs\n' >.file-size-baseline
+git add .file-size-baseline
+commit renamed
+if scripts/size-check --against master 2>err; then
+  echo "FAIL: expected block: $case" >&2
+  exit 1
+fi
+expect "raises legacy.rs from 30000 to 80000 bytes"
+git checkout -q master
+
+ci() {
+  git update-ref refs/remotes/origin/master master
+  runner=$(mktemp -d)
+  awk '
+    /with the base branch.s checker/ { step = 1 }
+    step && /run: \|/ { body = 1; next }
+    body && /^ *[^ ]/ { if (!indent) indent = match($0, /[^ ]/); if (match($0, /[^ ]/) < indent) exit }
+    body { print substr($0, indent) }
+  ' "$workflow" >ci.sh
+  [ -s ci.sh ] || { echo "FAIL: no PR step in $workflow" >&2; exit 1; }
+  BASE_REF=master RUNNER_TEMP=$runner sh -eu ci.sh 2>err
+  ci_status=$?
+  rm -rf "$runner" ci.sh
+  return "$ci_status"
+}
+
+case="CI runs the base branch's checker, not the PR's"
+git checkout -q -b weakened
+printf '#!/bin/sh\nexit 0\n' >scripts/check-file-size
+printf '# bytes path\n80000 legacy.rs\n' >.file-size-baseline
+git add scripts/check-file-size .file-size-baseline
+commit weakened
+if ci; then
+  echo "FAIL: expected block: $case" >&2
+  exit 1
+fi
+expect "raises legacy.rs from 30000 to 80000 bytes"
+git checkout -q master
+
+case="CI on a clean PR passes"
+git checkout -q -b clean
+big 100 clean.rs
+git add clean.rs
+commit clean
+ci || { cat err; echo "FAIL: expected pass: $case" >&2; exit 1; }
+git checkout -q master
+
+case="--against: narrowing an exemption passes"
+git checkout -q -b narrow-base
+mkdir -p training/a training/x
+printf 'gen/** linguist-generated\nvendor/** linguist-vendored\ntraining/**/*.jsonl linguist-generated\n' >.gitattributes
+big 60000 training/a/train1.jsonl
+git add .gitattributes training
+commit "training data"
+git checkout -q -b narrowed
+printf 'gen/** linguist-generated\nvendor/** linguist-vendored\ntraining/**/train*.jsonl linguist-generated\n' >.gitattributes
+git add .gitattributes
+pass
+commit narrowed
+pass --against narrow-base
+pass --all
+
+case="--against: a new over-cap file under an existing broad exemption"
+git checkout -q narrow-base
+git checkout -q -b notes
+big 60000 training/x/notes.jsonl
+git add training/x/notes.jsonl
+commit notes
+fail --against narrow-base
+expect "training/x/notes.jsonl is 60000 bytes (~15000 tokens) and exempt through .gitattributes, but was not an exempt file at narrow-base"
+pass --all
+
+case="--against: a new exemption for a file committed earlier"
+git checkout -q narrow-base
+git checkout -q -b widened
+big 60000 training/a/notes.md
+git add training/a/notes.md
+commit "notes over the cap"
+printf 'training/** linguist-generated\n' >>.gitattributes
+git add .gitattributes
+fail
+expect "training/a/notes.md is 60000 bytes"
+commit widened
+fail --against HEAD~1
+expect "training/a/notes.md is 60000 bytes (~15000 tokens) and exempt through .gitattributes, but was not an exempt file at HEAD~1"
+git checkout -q master
+
+case="nothing staged"
+git checkout -q clean
+pass
+git commit -q --allow-empty -m empty
+pass --against master
+git checkout -q master
 
 case="--all checks tracked files"
 big 20001 huge.rs
