@@ -43,7 +43,6 @@ pip install -U pip setuptools wheel
 
 log "2) non-editable install of workers (no [dev], no -e)"
 log "pip cmdline: pip install $ROOT/python"
-# Prove the install line is non-editable / non-dev (same as install.sh user path).
 printf 'pip install %s\n' "$ROOT/python" | grep -qE '(^| )-e |\[dev\]' \
   && die "pip install must not use -e or [dev]"
 pip install "$ROOT/python"

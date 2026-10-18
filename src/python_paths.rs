@@ -20,7 +20,6 @@ pub fn resolve_python_root(cfg: &Config) -> PathBuf {
         install_venv.as_deref().unwrap_or(Path::new("")),
     ) || path_is_data_venv_python(Path::new(&bin));
     let dev_repo = if using_install_venv {
-        // User install: do not point PYTHONPATH at a compile-time checkout path.
         None
     } else {
         Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python"))
@@ -50,14 +49,12 @@ pub fn resolve_python_root_with(
         if path.is_dir() {
             return path;
         }
-        // Stale checkout path: fall through to dev or empty.
     }
     if let Some(manifest) = dev_repo_python {
         if manifest.is_dir() {
             return manifest;
         }
     }
-    // User install: empty → WorkerClient omits PYTHONPATH; packages live in venv.
     PathBuf::new()
 }
 
@@ -140,7 +137,6 @@ pub fn worker_package_status(python_bin: &str, python_root: &str, package: &str)
             return "ok (tree)".into();
         }
     }
-    // Site-packages / installed layout: try import (mirrors WorkerClient::spawn).
     let mut cmd = Command::new(python_bin);
     cmd.args(["-c", &format!("import {package}")])
         .env("PYTHONUNBUFFERED", "1")

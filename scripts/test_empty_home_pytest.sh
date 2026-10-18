@@ -12,7 +12,6 @@ mkdir -p "$SCRATCH/empty-home" "$SCRATCH/empty-voices"
 cleanup() { rm -rf "$SCRATCH"; }
 trap cleanup EXIT
 
-# Prefer PATH pytest if it can import under empty HOME; else shipped entrypoint.
 export HOME="$SCRATCH/empty-home"
 export YAPPER_VOICES_DIR="$SCRATCH/empty-voices"
 export PYTHONPATH=python

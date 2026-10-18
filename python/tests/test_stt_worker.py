@@ -69,8 +69,6 @@ def test_unknown_cmd() -> None:
 
 def test_transcribe_missing_path() -> None:
     w = SttWorker()
-    # Force loaded-looking state without real model for path validation order:
-    # not_loaded is checked first — so we only get missing path when model set.
     w.state.model = object()
     w.state.model_name = "small"
     w.state.device = "cpu"
@@ -108,7 +106,6 @@ def test_transcribe_bad_language() -> None:
             params={"path": "/etc/hosts", "language": "de"},
         )
     )
-    # /etc/hosts exists so language is checked
     assert not resp.ok
     assert resp.error is not None
     assert resp.error.code == "bad_args"

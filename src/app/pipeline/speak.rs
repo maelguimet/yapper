@@ -18,10 +18,7 @@ impl YapperApp {
         self.transport.set_pending_queue(false);
         self.transport.stop();
         if had_in_flight {
-            // Mid-generate cannot cancel cooperatively. Out-of-band SIGKILL so we
-            // do not wait for the serial job_loop stuck inside synthesize.
             let killed = self.jobs.kill_tts_now();
-            // Job thread cleans WorkerManager/policy once the killed request returns.
             self.jobs.send(JobCmd::CancelTtsWorker);
             self.tts_loaded = false;
             self.tts_model_id = None;
@@ -108,13 +105,11 @@ impl YapperApp {
     }
 
     pub(crate) fn start_speak_job(&mut self, text: String) {
-        // Cancel any prior monologue; start chunked pipeline.
         let had_in_flight = self.tts.synth_in_flight;
         self.tts.cancel();
         self.transport.set_pending_queue(false);
         self.transport.stop();
         if speak_restart_needs_oob_kill(had_in_flight) {
-            // Same immediate path as Stop — do not queue Cancel behind blocking Synthesize.
             let _ = self.jobs.kill_tts_now();
             self.jobs.send(JobCmd::CancelTtsWorker);
             self.tts_loaded = false;

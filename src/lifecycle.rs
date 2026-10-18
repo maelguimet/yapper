@@ -155,7 +155,6 @@ mod tests {
         assert_eq!(intent, Some(ShellIntent::HardQuit));
         let s3 = ExitPromptState::AwaitingConfirm.on_cancel();
         assert_eq!(s3, ExitPromptState::Idle);
-        // Confirm without prompt does nothing
         let (s4, none) = ExitPromptState::Idle.on_confirm();
         assert_eq!(s4, ExitPromptState::Idle);
         assert_eq!(none, None);

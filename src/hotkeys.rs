@@ -41,7 +41,6 @@ impl HotkeyHub {
             return Err(e).with_context(|| format!("register push_to_talk {push_to_talk}"));
         }
 
-        // Drain stale events from a previous hub so they cannot fire wrong actions.
         drain_global_hotkey_events();
 
         Ok(Self {
@@ -102,8 +101,6 @@ pub fn reregister(
     read_aloud: &str,
     push_to_talk: &str,
 ) -> Result<HotkeyHub> {
-    // Explicit drop before new grabs — assignment order alone is not enough if
-    // register() runs while `previous` still lives in the caller's local.
     drop(previous);
     // Brief yield so X11 releases the old grabs before we re-acquire.
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -323,7 +320,6 @@ mod tests {
 
     #[test]
     fn parse_host_alt_shift_bindings() {
-        // Host config from user feedback B13
         let ra = parse_hotkey("Alt+Shift+S").unwrap();
         let ptt = parse_hotkey("Alt+Shift+Q").unwrap();
         assert_eq!(format_hotkey(&ra).unwrap(), "Alt+Shift+S");
@@ -453,7 +449,6 @@ mod tests {
         assert_eq!(specs2[0], "Alt+Shift+F11");
         assert_eq!(specs2[1], "Alt+Shift+F12");
 
-        // Third rebind back to host-like Alt+Shift combos
         let third = reregister(Some(second), "Alt+Shift+S", "Alt+Shift+Q")
             .expect("third reregister");
         let specs3 = third.registered_specs().unwrap();

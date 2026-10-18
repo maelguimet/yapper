@@ -9,7 +9,6 @@ from pathlib import Path
 
 from yapper_common.paths import voices_dir
 
-# Canonical tone set (matches tts/clone gold / emotion_map keys).
 DEFAULT_TONES: tuple[str, ...] = (
     "neutral",
     "calm",
@@ -97,7 +96,6 @@ def resolve_voices_root() -> Path:
 def load_knobs(voices_root: Path | None = None) -> dict[str, dict[str, float]]:
     root = voices_root or resolve_voices_root()
     knobs_path = root / "knobs.json"
-    # knobs often live next to gold in clone/
     if not knobs_path.is_file():
         clone = clone_source_dir()
         if clone is not None and (clone / "knobs.json").is_file():

@@ -90,7 +90,6 @@ def test_load_transcribe_unload_via_stdio(tmp_path: Path) -> None:
     download_root = Path.home() / ".local" / "share" / "yapper" / "models" / "whisper"
     download_root.mkdir(parents=True, exist_ok=True)
 
-    # Pre-download via handler API so stdio test is deterministic
     from yapper_stt.worker import SttWorker
     from yapper_common.ipc import Request
 

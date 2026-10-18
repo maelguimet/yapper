@@ -20,7 +20,6 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-# Piper TTS Python API (piper-tts on PyPI).
 python3 - <<'PY' "$MODELS" "$PIPER_VOICE" "$DEST" "$VOICE_ID"
 import sys
 from pathlib import Path

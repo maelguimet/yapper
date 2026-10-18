@@ -24,16 +24,11 @@ TTS_VERSION = "0.1.0"
 TTS_MODEL_ID = "chatterbox-multilingual"
 ALLOWED_LANGUAGES = frozenset({"auto", "en", "fr"})
 
-# Trailing silence after model audio — reduces abrupt cutoffs on chunked playback.
 TRAILING_PAD_MS = 150
 _NEAR_SILENT_PEAK = 1e-4
-# Absolute floor for empty/near-empty clips (independent of text length).
 _MIN_ABS_DURATION_S = 0.12
-# Extreme-but-plausible speech rates for lower bounds only.
-# Real speech is slower (~12–15 chars/s, ~2.5 words/s); we only catch obvious truncation.
 _MAX_PLAUSIBLE_CHARS_PER_S = 48.0
 _MAX_PLAUSIBLE_WORDS_PER_S = 6.5
-# Slow-speech ceiling (chars/s) with slack so long quiet pauses still pass.
 _MIN_PLAUSIBLE_CHARS_PER_S = 2.0
 _MAX_DURATION_SLACK = 1.5
 _MIN_MAX_DURATION_S = 4.0
@@ -234,7 +229,6 @@ class TtsWorker:
         sr = self.state.sample_rate or int(getattr(self.state.model, "sr", 24000) or 24000)
         duration = _audio_duration_secs(wav, sr)
 
-        # Empty / near-silent / absurd duration → retry once with safer knobs, then fail.
         if not _output_sane(text, duration, wav):
             log.warning(
                 "output sanity failed (duration=%.3fs chars=%d); retry with safer knobs",
@@ -265,7 +259,6 @@ class TtsWorker:
 
         alignment = _alignment_tail_metadata(self.state.model)
 
-        # Wall time covers accepted attempt (and retry when used), not only the first generate.
         gen_ms = (time.perf_counter() - t0) * 1000.0
         duration = _write_wav(out_path, wav, sr, alignment=alignment)
         log.info(

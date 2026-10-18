@@ -9,7 +9,6 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-// Path resolution lives in `python_paths`; re-export for existing call sites.
 pub use crate::python_paths::{resolve_python_bin, resolve_python_root, worker_package_status};
 
 pub struct WorkerManager {
@@ -107,7 +106,6 @@ impl WorkerManager {
             let resp = match c.request_timeout("unload", Default::default(), timeout) {
                 Ok(r) => r,
                 Err(e) => {
-                    // Hang on unload → hard kill and clear policy.
                     self.kill_worker(role);
                     return Err(e);
                 }
@@ -310,7 +308,6 @@ impl WorkerManager {
         ) {
             Ok(r) => r,
             Err(e) => {
-                // Timeout *or* out-of-band Stop kill — drop dead worker + clear policy.
                 self.kill_worker(Role::Tts);
                 return Err(e);
             }

@@ -16,7 +16,6 @@ fn paste_at_cursor_injects_text_into_focused_sink() {
     };
     let marker = format!("yapper-paste-{}", std::process::id());
     assert_injected_via_sink(&marker, "paste-inject-proof.txt", |m| paste_at_cursor(m));
-    // paste_at_cursor intentionally leaves text in CLIPBOARD
     let clip = read_selection(ClipboardSel::Clipboard).expect("clipboard");
     assert_eq!(clip, marker);
 }
@@ -54,7 +53,6 @@ fn insert_transcript_injects_text_into_focused_sink() {
     });
 }
 
-/// Copy on: after insert, CLIPBOARD holds the transcript (product "Copy transcript").
 #[test]
 fn insert_keep_clipboard_leaves_transcript() {
     let _guard = x11_lock();
@@ -91,7 +89,6 @@ fn insert_keep_clipboard_leaves_transcript() {
     );
 }
 
-/// Copy off: after insert, CLIPBOARD is restored to prior (not left as transcript).
 #[test]
 fn insert_restore_clipboard_when_copy_off() {
     let _guard = x11_lock();
@@ -129,7 +126,6 @@ fn insert_restore_clipboard_when_copy_off() {
     );
 }
 
-/// Empty prior + Copy off restores to empty (not leftover transcript).
 #[test]
 fn insert_restore_empty_prior_when_copy_off() {
     let _guard = x11_lock();
@@ -140,7 +136,6 @@ fn insert_restore_empty_prior_when_copy_off() {
             return;
         }
     };
-    // Clear CLIPBOARD as best-effort empty prior.
     write_clipboard("").expect("clear CLIPBOARD");
     let transcript = format!("yapper-transcript-empty-prior-{}", std::process::id());
     insert_transcript_at_cursor(&transcript, false).expect("insert with restore");

@@ -32,11 +32,8 @@ def _prepend(path: Path) -> None:
 
 def _ensure_test_runner_site() -> None:
     ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    # 1) Relative to this script when installed as ~/.local/bin/pytest
     bindir = Path(__file__).resolve().parent
     _prepend(bindir.parent / "lib" / ver / "site-packages")
-    # 2) Same layout one level up (…/local/bin → …/local/lib/…)
-    # 3) Real login home user-site (password DB), ignoring temporary HOME=
     try:
         import pwd
 

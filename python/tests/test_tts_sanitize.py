@@ -10,7 +10,6 @@ from yapper_tts.sanitize import (
     sanitize_for_tts,
 )
 
-# Shared golden fixtures under repo fixtures/ (mirrored cases with Rust).
 _FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "sanitize"
 
 

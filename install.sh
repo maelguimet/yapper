@@ -19,20 +19,12 @@ DATA="${XDG_DATA_HOME:-$HOME/.local/share}/yapper"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/yapper"
 VENV="$DATA/venv"
 DRY_RUN="${YAPPER_DRY_RUN:-0}"
-# Dev-only: editable + [dev] extras into the app venv (not for normal install).
 DEV_INSTALL="${YAPPER_DEV_INSTALL:-0}"
-# Previous releases could write an unsafe system-wide entry here. This is a
-# fixed constant in production; tests override the shell variable after source.
 SYSTEM_AUTOSTART_DIR="/etc/xdg/autostart"
 
-# Default install fetches Whisper small only (~500 MiB). Medium (~1.5 GiB) is
-# optional via YAPPER_MODELS; first UI load of a missing size may still
-# network-download via openai-whisper (documented in README).
 DEFAULT_YAPPER_MODELS="small"
 ALLOWED_WHISPER_SIZES="small medium"
 
-# Hard build/runtime tools: "tool|what breaks without it"
-# Shared by live install and dry-run; tests assert coverage against README.
 HARD_DEPS=(
   "rustc|cannot build the yapper binary"
   "cargo|cannot build the yapper binary"
@@ -43,7 +35,6 @@ HARD_DEPS=(
   "xdotool|paste-at-cursor injection (ctrl+v) for hold-to-talk"
 )
 
-# Preferred/optional tools: "tool|what you lose if missing"
 OPTIONAL_DEPS=(
   "mpv|TTS pause/seek and multi-chunk playlist fall back to per-file ffplay/paplay"
   "ffplay|last-resort TTS player when mpv is missing (usually with ffmpeg package)"
@@ -54,7 +45,6 @@ log() { printf '==> %s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Overridable for unit tests (see scripts/test_install_truth.sh).
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -63,7 +53,6 @@ have_cmd() {
 # Default: small. Allowed: small, medium. Prints unique sizes in canonical order.
 # Dies on empty or unknown tokens.
 parse_yapper_models() {
-  # Unset → default. Explicit empty string → die (do not silently re-default).
   local raw="${YAPPER_MODELS-$DEFAULT_YAPPER_MODELS}"
   raw="${raw//,/ }"
   # shellcheck disable=SC2086
@@ -191,7 +180,6 @@ setup_python() {
   fi
   mkdir -p "$DATA"
   if [[ ! -d "$VENV" ]]; then
-    # Reuse system torch/CUDA packages when present
     python3 -m venv --system-site-packages "$VENV"
   fi
   # shellcheck disable=SC1091
@@ -201,7 +189,6 @@ setup_python() {
     log "dev install: editable python[dev] (requires checkout at $ROOT)"
     pip install -e "$ROOT/python[dev]" || pip install -e "$ROOT/python"
   else
-    # Non-editable: package copied into venv site-packages; checkout may be deleted after.
     pip install "$ROOT/python"
   fi
   # Chatterbox 0.1.7 publishes a vulnerable torch==2.6.0 pin. Download the
@@ -218,7 +205,6 @@ install_voices() {
     log "[dry-run] scripts/install_voices.sh → $DATA/voices (YAPPER_VOICES_DIR)"
     return
   fi
-  # Same env workers use (config models.voices_dir → YAPPER_VOICES_DIR).
   YAPPER_VOICES_DIR="$DATA/voices" bash "$ROOT/scripts/install_voices.sh" || warn "voice install failed"
 }
 
@@ -241,7 +227,6 @@ download_models() {
   fi
   local py="$VENV/bin/python"
   [[ -x "$py" ]] || py=python3
-  # Same env workers use (config models.dir → YAPPER_MODELS_DIR).
   # shellcheck disable=SC2086
   YAPPER_MODELS_DIR="$DATA/models" "$py" "$ROOT/scripts/download_models.py" "$@" \
     || warn "model download failed"
@@ -258,14 +243,12 @@ write_config() {
   if [[ ! -f "$CONFIG/config.toml" ]]; then
     "$BIN_DIR/yapper" init-config || true
   fi
-  # Point runtime at the install venv only — never at the source checkout.
   if [[ -f "$CONFIG/config.toml" ]]; then
     python3 - <<PY || true
 from pathlib import Path
 import re
 p = Path("$CONFIG/config.toml")
 text = p.read_text()
-# Empty python_root: workers import from python_bin's site-packages.
 text = re.sub(r'python_root = ".*"', 'python_root = ""', text)
 text = re.sub(r'python_bin = ".*"', 'python_bin = "$VENV/bin/python"', text)
 p.write_text(text)
@@ -465,7 +448,6 @@ main() {
   log "checkout may be moved/deleted; runtime uses $VENV only"
 }
 
-# Allow scripts/test_install_truth.sh to source functions without running install.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   main "$@"
 fi

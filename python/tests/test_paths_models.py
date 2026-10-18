@@ -57,7 +57,7 @@ def test_stt_worker_uses_configured_whisper_root(tmp_path: Path, monkeypatch) ->
     models = tmp_path / "cfg_models"
     monkeypatch.setenv("YAPPER_MODELS_DIR", str(models))
     monkeypatch.delenv("YAPPER_DATA_DIR", raising=False)
-    worker = SttWorker()  # no explicit download_root — same as process entrypoint
+    worker = SttWorker()
     assert worker.download_root is None
     assert worker.whisper_root() == (models / "whisper").resolve()
     assert worker.whisper_root() == whisper_models_dir()
@@ -79,11 +79,10 @@ def test_tts_worker_list_tones_uses_configured_voices_root(
     (voices / "default_neutral.wav").write_bytes(b"RIFF....WAVE")
     (voices / "default_calm.wav").write_bytes(b"RIFF....WAVE")
     monkeypatch.setenv("YAPPER_VOICES_DIR", str(voices))
-    # Avoid accidental clone-gold pollution when installed dir is empty — ours has wavs.
     monkeypatch.delenv("YAPPER_TTS_CLONE", raising=False)
     monkeypatch.setenv("YAPPER_DATA_DIR", str(tmp_path / "unused_data"))
 
-    worker = TtsWorker()  # process entrypoint shape: no voices_root arg
+    worker = TtsWorker()
     assert worker.voices_root is None
     tones = list_tone_names(worker.voices_root)
     assert tones == ["calm", "neutral"]
@@ -104,7 +103,7 @@ def test_tts_resolve_tone_uses_configured_voices_root(
     monkeypatch.setenv("YAPPER_VOICES_DIR", str(voices))
     monkeypatch.delenv("YAPPER_TTS_CLONE", raising=False)
 
-    tone = resolve_tone("neutral")  # no voices_root → paths.voices_dir()
+    tone = resolve_tone("neutral")
     assert tone.ref_wav.is_file()
     assert tone.ref_wav.name == "default_neutral.wav"
     assert tone.ref_wav.parent.resolve() == voices.resolve()
@@ -121,7 +120,6 @@ def test_ensure_whisper_returns_existing_file_without_download(tmp_path: Path) -
     root = tmp_path / "whisper"
     root.mkdir(parents=True)
     target = root / "small.pt"
-    # Sparse file meets size gate without filling disk.
     with open(target, "wb") as fh:
         fh.truncate(450_000_000)
     path = ensure_whisper_model("small", download_root=root)

@@ -111,10 +111,9 @@ pub fn transport_status_line(
         return "Idle".into();
     }
     if has_active_job && total > 0 {
-        let n = playing_index.map(|i| i + 1).unwrap_or_else(|| {
-            // Synthesizing first chunk before any play.
-            1usize.min(total)
-        });
+        let n = playing_index
+            .map(|i| i + 1)
+            .unwrap_or_else(|| 1usize.min(total));
         let phase = if synth_in_flight && transport_idle {
             "Synthesizing"
         } else if transport_idle {
@@ -181,7 +180,6 @@ pub fn tts_empty_guidance(tts_loaded: bool, text_empty: bool) -> Option<&'static
 }
 
 pub fn tts_guidance_is_warning(_tts_loaded: bool, text_empty: bool) -> bool {
-    // Empty text is quiet helper, not an error.
     let _ = text_empty;
     false
 }

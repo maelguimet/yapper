@@ -42,7 +42,6 @@ impl MpvBackend {
             .stderr(Stdio::null())
             .spawn()
             .context("spawn mpv")?;
-        // Wait briefly for socket; fail if mpv dies or IPC never becomes usable.
         let deadline = Instant::now() + Duration::from_millis(800);
         let mut backend = Self {
             child,
@@ -55,14 +54,9 @@ impl MpvBackend {
                 bail!("mpv exited before IPC ready (status={status})");
             }
             if ipc.exists() {
-                match UnixStream::connect(&ipc) {
-                    Ok(stream) => {
-                        drop(stream);
-                        return Ok(backend);
-                    }
-                    Err(_) => {
-                        // Socket file appeared but not ready yet — keep waiting.
-                    }
+                if let Ok(stream) = UnixStream::connect(&ipc) {
+                    drop(stream);
+                    return Ok(backend);
                 }
             }
             if Instant::now() >= deadline {
@@ -127,7 +121,6 @@ impl MpvBackend {
                     if let Some(resp) = match_mpv_response(trimmed, request_id) {
                         return Ok(resp.to_string());
                     }
-                    // Event or unrelated response — keep reading.
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
@@ -260,7 +253,6 @@ pub fn match_mpv_response(line_or_buffer: &str, request_id: u64) -> Option<&str>
             continue;
         }
         let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-        // Skip pure events.
         if v.get("event").is_some() && v.get("request_id").is_none() {
             continue;
         }
@@ -283,9 +275,7 @@ pub fn mpv_response_ok(resp: &str) -> bool {
 }
 
 fn parse_mpv_success_data(resp: &str) -> Option<serde_json::Value> {
-    // Prefer matching a single response object; also tolerate multi-line buffers.
     let line = if resp.contains('\n') {
-        // Without a known request_id, take the first success line with data.
         resp.lines().find(|l| {
             let t = l.trim();
             !t.is_empty()

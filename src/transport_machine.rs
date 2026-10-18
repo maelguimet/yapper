@@ -95,7 +95,6 @@ impl TransportMachine {
     pub fn stop(&mut self) {
         self.status = TransportStatus::Idle;
         self.position_secs = 0.0;
-        // Keep last_path for replay.
         self.has_pending_queue = false;
     }
 
@@ -204,7 +203,6 @@ mod tests {
         assert!(m.replay_request().is_none());
         m.on_audio_ready(PathBuf::from("/tmp/last.wav"), 5.0);
         m.stop();
-        // last_path survives stop for Replay without re-synth
         assert_eq!(m.last_path, Some(PathBuf::from("/tmp/last.wav")));
         let p = m.replay_request().unwrap();
         assert_eq!(p, PathBuf::from("/tmp/last.wav"));
@@ -228,7 +226,6 @@ mod tests {
         m.begin_buffering();
         m.on_audio_ready(PathBuf::from("/tmp/c0.wav"), 1.0);
         assert_eq!(m.status, TransportStatus::Playing);
-        // Next segment joins playlist — no process spawn, status stays Playing.
         m.on_chunk_appended(PathBuf::from("/tmp/c1.wav"), 1.0);
         assert_eq!(m.status, TransportStatus::Playing);
         m.on_chunk_appended(PathBuf::from("/tmp/c2.wav"), 1.0);
@@ -243,7 +240,6 @@ mod tests {
         m.on_audio_ready(PathBuf::from("/tmp/c0.wav"), 1.0);
         m.on_playback_ended();
         assert_eq!(m.status, TransportStatus::Buffering);
-        // Late chunk after underrun: append path treats Buffering → Playing.
         m.on_chunk_appended(PathBuf::from("/tmp/c1.wav"), 1.2);
         assert_eq!(m.status, TransportStatus::Playing);
         assert!((m.duration_secs - 1.2).abs() < 0.001);
@@ -266,7 +262,6 @@ mod tests {
             Some(PathBuf::from("/tmp/c1.wav")),
             "last_path survives for Replay"
         );
-        // Stale ready chunks must not auto-advance after stop (caller clears them).
         m.on_playback_ended();
         assert_eq!(
             m.status,
@@ -278,7 +273,6 @@ mod tests {
     #[test]
     fn replay_request_points_at_full_utterance_path() {
         let mut m = TransportMachine::default();
-        // Multi-chunk job finished: durable concat replaces per-chunk last_path.
         m.on_audio_ready(PathBuf::from("/tmp/chunk-last.wav"), 1.0);
         m.stop();
         m.last_path = Some(PathBuf::from("/tmp/full-utterance.wav"));

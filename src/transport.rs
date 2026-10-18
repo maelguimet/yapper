@@ -8,10 +8,8 @@ use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use crate::mpv_backend::{which_bin, wav_duration_secs, MpvBackend};
 
-// Re-export pure machine types for existing callers.
 pub use crate::transport_machine::{TransportMachine, TransportStatus};
 
-// Re-export for callers/tests that timed WAV duration via transport path.
 #[cfg(test)]
 pub use crate::mpv_backend::wav_duration_from_bytes;
 
@@ -119,7 +117,6 @@ impl AudioTransport {
                 Ok(())
             }
             Err(e) => {
-                // Fallback: legacy fire-and-forget if mpv missing.
                 if which_bin("ffplay") || which_bin("paplay") || which_bin("aplay") {
                     let child = crate::audio::play_wav(path)?;
                     self.backend = Some(MpvBackend::fallback_child(child));
@@ -163,7 +160,6 @@ impl AudioTransport {
                     return Ok(());
                 }
                 Err(e) => {
-                    // Process may have raced to exit; fall through to fresh start.
                     eprintln!("yapper: playlist append failed ({e:#}); restarting player");
                     if let Some(mut b) = self.backend.take() {
                         b.kill();
@@ -172,7 +168,6 @@ impl AudioTransport {
             }
         }
 
-        // Fallback (no IPC): only start when not already holding a child.
         if let Some(b) = self.backend.as_mut() {
             if !b.has_ipc() && !b.is_ended() {
                 bail!("fallback player busy; wait for end before next chunk");
@@ -228,8 +223,6 @@ impl AudioTransport {
         if keep_last {
             self.machine.last_path = last;
         } else {
-            // Drop last_path only when caller wants a clean slate (new play replaces it).
-            // play_file uses keep_last=false then sets a new path via on_audio_ready.
             self.machine.last_path = None;
         }
     }

@@ -9,7 +9,6 @@ mkdir -p "$SCRATCH"
 LOG="$SCRATCH/x11.log"
 : >"$LOG"
 
-# Whole script safety net (GPU TTS+STT + cargo)
 SCRIPT_DEADLINE="${YAPPER_SMOKE_DEADLINE:-600}"
 
 log() { printf '%s\n' "$*" | tee -a "$LOG"; }
@@ -42,7 +41,6 @@ export PYTHONUNBUFFERED=1
 PY="${ROOT}/.venv/bin/python"
 [[ -x "$PY" ]] || PY=python3
 
-# Re-exec under outer timeout if not already wrapped
 if [[ -z "${YAPPER_SMOKE_WRAPPED:-}" ]]; then
   export YAPPER_SMOKE_WRAPPED=1
   exec timeout --foreground --signal=TERM --kill-after=15s "${SCRIPT_DEADLINE}s" "$0" "$@"
@@ -54,13 +52,11 @@ log "session=${XDG_SESSION_TYPE:-unknown}"
 log "deadline=${SCRIPT_DEADLINE}s"
 log "note: paste tests use Xvfb isolation inside rust tests (no focus steal)"
 
-# --- X11 unit tests (PRIMARY, CLIPBOARD, paste_at_cursor under Xvfb) ---
 log "--- cargo test x11util (isolated Xvfb) ---"
 run_to 30 "cargo x11util" -- \
   cargo test --quiet x11util:: -- --nocapture --test-threads=1
 log "cargo_x11_tests_ok"
 
-# --- Select → speak ---
 log "--- select→speak (PRIMARY → TTS WAV) ---"
 run_to 300 "select_speak_tts" -- "$PY" - <<'PY'
 import json, os, subprocess, sys, wave
@@ -132,7 +128,6 @@ print(f"select_speak_wav_ok size={out_wav.stat().st_size} frames={frames}")
 print("SELECT_SPEAK_OK")
 PY
 
-# --- Hold-to-talk: STT fixture → write transcript → insert_transcript inject (Xvfb) ---
 log "--- hold-to-talk insert (transcribe → insert_transcript_at_cursor) ---"
 run_to 180 "hold_to_talk_stt" -- "$PY" - <<'PY'
 import json, os, subprocess, sys
@@ -189,7 +184,6 @@ print(f"transcript={text!r}")
 print("HOLD_TO_TALK_STT_OK")
 PY
 
-# Drive shipped insert_transcript_at_cursor with the real transcript (Xvfb sink inject).
 log "--- insert_transcript inject (cargo, uses hold-to-talk-transcript.txt) ---"
 export LD_LIBRARY_PATH="${SCRATCH}/debroot/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export YAPPER_REQUIRE_TRANSCRIPT=1
@@ -203,7 +197,6 @@ if [[ ! -f "$PROOF" ]]; then
   exit 1
 fi
 log "insert_proof=$(tr '\n' ' ' <"$PROOF")"
-# Body must contain the STT transcript (trimmed)
 TRANSCRIPT=$(tr -d '\n' <"$SCRATCH/hold-to-talk-transcript.txt")
 if ! grep -F "body=${TRANSCRIPT}" "$PROOF" >/dev/null \
   && ! grep -F "$TRANSCRIPT" "$PROOF" >/dev/null; then

@@ -84,7 +84,6 @@ impl YapperApp {
                 intent,
                 text,
             } => {
-                // Job-scoped: ignore stale results from a prior session/job.
                 if !is_live_stt_job(self.live_stt_job, job_id) {
                     return;
                 }
@@ -92,8 +91,6 @@ impl YapperApp {
                 self.transcript = text.clone();
                 let follow = follow_up_after_transcribe(intent, &text);
                 if follow == TranscribeFollowUp::InsertAtCursor {
-                    // Insert owns final CLIPBOARD: paste via clipboard+ctrl+v (no Enter);
-                    // keep transcript only when Copy transcript is on (else restore prior).
                     match x11util::insert_transcript_at_cursor(&text, self.copy_transcript) {
                         Ok(()) => {
                             self.status = status_after_transcribe_success(follow).into();
@@ -104,7 +101,6 @@ impl YapperApp {
                     }
                     return;
                 }
-                // Panel-only path (GUI Dictate / file): optional copy, never paste.
                 if self.copy_transcript {
                     if let Err(e) = x11util::write_clipboard(&text) {
                         self.status = format!("transcribed; clipboard failed: {e}");
@@ -158,7 +154,6 @@ impl YapperApp {
                 } else {
                     self.status = format!("segment {} skipped: {error}", index + 1);
                 }
-                // If worker was killed on timeout, tts_loaded may be false — reload.
                 if should_reload_tts_after_live_synth_failure(
                     self.tts_loaded,
                     self.tts.active_job,
@@ -174,45 +169,33 @@ impl YapperApp {
                 op,
                 error,
                 job_id,
-            } => {
-                match role {
-                    Role::Stt => {
-                        self.stt_loaded = false;
-                        self.stt_model_id = None;
-                        self.stt_loading = false;
-                        self.status = format!("{role:?} {op}: {error}");
-                    }
-                    Role::Tts => {
-                        // Job-scoped filter: Stop/Restart kills must not overwrite
-                        // "playback stopped" / "restarting voice…" status.
-                        let mut ui = TtsTimeoutUiState {
-                            status: self.status.clone(),
-                            tts_loaded: self.tts_loaded,
-                            tts_model_id: self.tts_model_id.clone(),
-                            tts_loading: self.tts_loading,
-                        };
-                        let d = apply_tts_synth_timeout(
-                            &mut ui,
-                            self.tts.active_job,
-                            job_id,
-                            &op,
-                            &error,
-                        );
-                        if d == SynthTimeoutDisposition::ReportAndClearBadge {
-                            self.status = ui.status;
-                            self.tts_loaded = ui.tts_loaded;
-                            self.tts_model_id = ui.tts_model_id;
-                            self.tts_loading = ui.tts_loading;
-                        }
-                        // SilentCleanup: leave status + loading flags alone;
-                        // ModelStatus / CancelTtsWorker already reflect worker death.
+            } => match role {
+                Role::Stt => {
+                    self.stt_loaded = false;
+                    self.stt_model_id = None;
+                    self.stt_loading = false;
+                    self.status = format!("{role:?} {op}: {error}");
+                }
+                Role::Tts => {
+                    let mut ui = TtsTimeoutUiState {
+                        status: self.status.clone(),
+                        tts_loaded: self.tts_loaded,
+                        tts_model_id: self.tts_model_id.clone(),
+                        tts_loading: self.tts_loading,
+                    };
+                    let d =
+                        apply_tts_synth_timeout(&mut ui, self.tts.active_job, job_id, &op, &error);
+                    if d == SynthTimeoutDisposition::ReportAndClearBadge {
+                        self.status = ui.status;
+                        self.tts_loaded = ui.tts_loaded;
+                        self.tts_model_id = ui.tts_model_id;
+                        self.tts_loading = ui.tts_loading;
                     }
                 }
-            }
+            },
             AppMsg::TonesListed { tones } => {
                 if !tones.is_empty() {
                     self.tones = tones;
-                    // Keep current selection if still present; else first tone.
                     if !self.tones.iter().any(|t| t == &self.tts_tone) {
                         if let Some(first) = self.tones.first() {
                             self.tts_tone = first.clone();

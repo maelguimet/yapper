@@ -56,7 +56,6 @@ def test_load_knobs_merges_file(tmp_path: Path) -> None:
     loaded = load_knobs(tmp_path)
     assert loaded["neutral"]["exg"] == 0.11
     assert loaded["neutral"]["cfg"] == 0.22
-    # defaults still present for other tones
     assert "calm" in loaded
 
 

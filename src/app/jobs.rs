@@ -45,7 +45,6 @@ impl JobHub {
     }
 
     pub fn send(&self, cmd: JobCmd) {
-        // Ignore send errors after shutdown (app exit).
         let _ = self.cmd_tx.send(cmd);
     }
 
@@ -81,7 +80,6 @@ impl JobHub {
         match done_rx.recv_timeout(budget) {
             Ok(()) => true,
             Err(_) => {
-                // Budget exhausted: do not hang. Worker PIDs already killed.
                 debug_assert!(job_shutdown_join_exceeded(t0.elapsed(), budget));
                 let _ = job_shutdown_join_exceeded(t0.elapsed(), budget);
                 false
@@ -215,7 +213,6 @@ fn handle_cmd(
                 }
                 Err(e) => {
                     let err = format!("{e:#}");
-                    // Timeout path kills STT worker; always refresh badges from policy.
                     if err.to_ascii_lowercase().contains("timed out") {
                         let _ = msg_tx.send(AppMsg::WorkerTimedOut {
                             role: Role::Stt,
@@ -253,7 +250,6 @@ fn handle_cmd(
                 return;
             }
             let _ = total;
-            // Publish pid *before* blocking so Stop / Restart can kill mid-generate.
             sync_live_pids(workers, live);
             match workers.synthesize(&text, &language, &tone, &voice, &out_path) {
                 Ok(path) => {
@@ -268,9 +264,6 @@ fn handle_cmd(
                 }
                 Err(e) => {
                     let err = format!("{e:#}");
-                    // synthesize_timeout kills TTS on *any* request Err (timeout,
-                    // broken pipe, cancelled, crash). job_id lets the UI ignore
-                    // expected Stop/Restart kills; ModelStatus still refreshes badges.
                     let _ = msg_tx.send(AppMsg::WorkerTimedOut {
                         role: Role::Tts,
                         op: "synthesize".into(),
@@ -288,7 +281,6 @@ fn handle_cmd(
             sync_live_pids(workers, live);
         }
         JobCmd::CancelTtsWorker => {
-            // May already be dead from kill_tts_now(); still clear policy + client.
             workers.kill_worker(Role::Tts);
             live.set_tts(None);
             push_status(workers, msg_tx);
@@ -298,12 +290,8 @@ fn handle_cmd(
                 Ok(tones) if !tones.is_empty() => {
                     let _ = msg_tx.send(AppMsg::TonesListed { tones });
                 }
-                Ok(_) | Err(_) => {
-                    // Keep UI fallback tones; no dramatic error.
-                }
+                Ok(_) | Err(_) => {}
             }
-            // list_tones may have spawned a worker without loading the model —
-            // do not claim TTS loaded; policy only marks on successful load.
             push_status(workers, msg_tx);
             sync_live_pids(workers, live);
         }
@@ -318,7 +306,6 @@ fn handle_cmd(
 /// Pure classifier: any synth request failure that killed the worker must clear UI badges.
 #[cfg(test)]
 pub fn synth_error_clears_loaded_badge() -> bool {
-    // WorkerManager::synthesize_timeout always kill_worker on Err.
     crate::ui::synth_error_resets_worker()
 }
 
@@ -359,8 +346,6 @@ mod tests {
 
     #[test]
     fn restart_and_stop_share_oob_kill_path() {
-        // Same LiveWorkerPids::kill_tts_now used by cancel_tts_pipeline and
-        // start_speak_job when speak_restart_needs_oob_kill is true.
         assert!(crate::ui::speak_restart_needs_oob_kill(true));
         assert!(synth_error_clears_loaded_badge());
     }
@@ -378,7 +363,6 @@ mod tests {
             elapsed < JOB_SHUTDOWN_JOIN_BUDGET,
             "join took {elapsed:?}, budget {JOB_SHUTDOWN_JOIN_BUDGET:?}"
         );
-        // Second call is a no-op (handle already taken).
         assert!(hub.shutdown_bounded(Duration::from_millis(50)));
     }
 }

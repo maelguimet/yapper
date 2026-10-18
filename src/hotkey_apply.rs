@@ -240,7 +240,6 @@ mod tests {
 
         let after = live_specs_after_outcome(&previous, &outcome);
         assert_eq!(after, previous);
-        // Disk must keep previous applied specs, not the unapplied drafts.
         let disk = hotkeys_persist_payload(&after, draft_read, draft_ptt);
         assert_eq!(disk, previous);
     }
@@ -279,7 +278,6 @@ mod tests {
         let live = live_defaults();
         let garbage_read = "@@@not-a-key@@@";
         let garbage_ptt = "";
-        // User typed garbage in editors then Save — payload ignores drafts.
         let payload = hotkeys_persist_payload(&live, garbage_read, garbage_ptt);
         assert_eq!(payload, live);
         assert!(canonicalize_hotkey_spec(&payload.read_aloud).is_ok());
@@ -314,7 +312,6 @@ mod tests {
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.hotkeys.read_aloud, "Ctrl+Alt+S");
         assert_eq!(loaded.hotkeys.push_to_talk, "Ctrl+Alt+R");
-        // Startup register uses these live fields — same as load cycle.
         assert_eq!(
             validate_draft_hotkeys(
                 &loaded.hotkeys.read_aloud,
@@ -329,7 +326,6 @@ mod tests {
 
     #[test]
     fn grab_result_ignored_when_draft_invalid() {
-        // Even if caller passes Ok(()), invalid draft must not commit.
         let previous = live_defaults();
         let outcome = apply_hotkeys_decision("", "Super+Shift+R", &previous, Ok(()));
         assert!(matches!(outcome, HotkeyApplyOutcome::InvalidDraft { .. }));
