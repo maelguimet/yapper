@@ -1,105 +1,168 @@
 #!/bin/sh
 # Blocks files over the size cap: about 5,000 tokens, counted as bytes / 4.
 #
-#   scripts/check-file-size            check staged files (the pre-commit hook)
-#   scripts/check-file-size --all      check every tracked file (CI)
-#   scripts/check-file-size --list     print current offenders in baseline format
+#   scripts/check-file-size              staged files, plus exemption changes since HEAD
+#   scripts/check-file-size --all        every tracked file
+#   scripts/check-file-size --against R  reject baseline growth or new exemptions since R
+#   scripts/check-file-size --list       current offenders, in baseline format
 #
-# Files listed in .file-size-baseline ("<bytes> <path>") were over the cap when
-# the check was introduced. They may shrink but not grow. Every other file must
-# stay under the cap. Lockfiles, binary assets, and files marked
-# linguist-generated or linguist-vendored in .gitattributes are exempt.
+# Sizes and attributes come from the index, so the staged content is what is
+# checked. Files listed in .file-size-baseline ("<bytes> <path>") were over the
+# cap when the check was introduced; they may shrink but not grow, and entries
+# may only be removed or lowered. Exempt: lockfiles by name, binary content (a
+# NUL byte in the first 8,000 bytes, git's own test), and paths marked
+# linguist-generated, linguist-vendored, binary or -diff in .gitattributes.
+# Any lookup that fails counts as a failure.
 
 set -eu
 
 MAX_BYTES=${FILE_SIZE_MAX_BYTES:-20000}
 BASELINE=.file-size-baseline
+LOCKFILES="Cargo.lock package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock
+bun.lock bun.lockb poetry.lock uv.lock pdm.lock Pipfile.lock Gemfile.lock
+composer.lock go.sum flake.lock"
 
-cd "$(git rev-parse --show-toplevel)"
+die() {
+  echo "file-size: $*" >&2
+  exit 2
+}
+
+usage() {
+  echo "usage: $0 [--all | --list | --against <ref>]" >&2
+  exit 2
+}
+
+self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+top=$(git rev-parse --show-toplevel) || die "not inside a git work tree"
+cd "$top"
+
+# The value git reports for one attribute of a path, read from the index.
+attr() {
+  out=$(git check-attr --cached "$1" -- "$2") || die "git check-attr failed for $2"
+  printf '%s\n' "${out##*: }"
+}
+
+exempt() {
+  name=${1##*/}
+  for lock in $LOCKFILES; do
+    [ "$name" = "$lock" ] && return 0
+  done
+  case "$(attr linguist-generated "$1")" in set | true) return 0 ;; esac
+  case "$(attr linguist-vendored "$1")" in set | true) return 0 ;; esac
+  [ "$(attr binary "$1")" = set ] && return 0
+  [ "$(attr diff "$1")" = unset ] && return 0
+  nul=$(git cat-file blob ":0:$1" | head -c 8000 | tr -dc '\000' | wc -c) ||
+    die "cannot read the staged content of $1"
+  [ "$nul" -gt 0 ]
+}
+
+baseline_size() {
+  [ -s "$FILE_SIZE_BASELINE_FILE" ] || return 1
+  P=$1 awk '
+    BEGIN { path = ENVIRON["P"] }
+    /^[[:space:]]*(#|$)/ { next }
+    { size = $1; sub(/^[^ ]+ /, ""); if ($0 == path) { print size; found = 1; exit } }
+    END { exit found ? 0 : 1 }
+  ' "$FILE_SIZE_BASELINE_FILE"
+}
+
+tokens() { echo $(($1 / 4)); }
+
+# One file, run by xargs: exit 0 if it fits, 1 if it is too big, 2 on error.
+check_file() {
+  path=$2
+  size=$(git cat-file -s ":0:$path") || die "cannot read the staged size of $path"
+  [ "$size" -gt "$MAX_BYTES" ] || return 0
+  exempt "$path" && return 0
+  if [ "$1" = list ]; then
+    printf '%s %s\n' "$size" "$path"
+    return 0
+  fi
+  if allowed=$(baseline_size "$path"); then
+    [ "$size" -le "$allowed" ] && return 0
+    echo "file-size: $path grew to $size bytes (~$(tokens "$size") tokens); its baseline is $allowed bytes." >&2
+  else
+    echo "file-size: $path is $size bytes (~$(tokens "$size") tokens), over the $MAX_BYTES-byte (~$(tokens "$MAX_BYTES")-token) cap." >&2
+  fi
+  return 1
+}
+
+# Baseline entries may only shrink or disappear, and .gitattributes may not
+# gain exemptions, between <ref> and the index.
+check_against() {
+  ref=$1
+  git rev-parse --verify --quiet "$ref^{commit}" >/dev/null || die "unknown ref $ref"
+  if ! git cat-file -e "$ref:${self#"$top"/}" 2>/dev/null; then
+    echo "file-size: $ref predates this check; the baseline and exemptions it adds are reviewed in this change." >&2
+    return 0
+  fi
+  status=0
+  before=$(mktemp)
+  after=$(mktemp)
+  git show "$ref:$BASELINE" >"$before" 2>/dev/null || : >"$before"
+  git show ":0:$BASELINE" >"$after" 2>/dev/null || : >"$after"
+  N=$BASELINE awk '
+    BEGIN { name = ENVIRON["N"] }
+    /^[[:space:]]*(#|$)/ { next }
+    { size = $1; sub(/^[^ ]+ /, "") }
+    FILENAME == ARGV[1] { base[$0] = size; next }
+    !($0 in base) { printf "file-size: %s adds %s (%s bytes); baseline entries may only shrink or be removed.\n", name, $0, size; bad = 1; next }
+    size + 0 > base[$0] + 0 { printf "file-size: %s raises %s from %s to %s bytes; baseline entries may only shrink or be removed.\n", name, $0, base[$0], size; bad = 1 }
+    END { exit bad }
+  ' "$before" "$after" >&2 || status=1
+  rm -f "$before" "$after"
+  added=$(git diff --cached --no-color --no-ext-diff -U0 "$ref" -- ':(glob).gitattributes' ':(glob)**/.gitattributes') ||
+    die "cannot diff .gitattributes against $ref"
+  exemptions=$(printf '%s\n' "$added" | grep -E '^\+[^+]' |
+    grep -E '(^|[[:space:]])(linguist-generated|linguist-vendored)(=true)?([[:space:]]|$)|(^|[[:space:]])(binary|-diff)([[:space:]]|$)' || true)
+  if [ -n "$exemptions" ]; then
+    echo "file-size: .gitattributes gains size-check exemptions since $ref:" >&2
+    printf '%s\n' "$exemptions" | sed 's/^+/  /' >&2
+    status=1
+  fi
+  return "$status"
+}
 
 mode=staged
 case "${1:-}" in
   "") ;;
   --all) mode=all ;;
   --list) mode=list ;;
-  *) echo "usage: $0 [--all|--list]" >&2; exit 2 ;;
+  --against) [ $# -eq 2 ] && [ -n "$2" ] || usage; check_against "$2"; exit ;;
+  --file) [ $# -eq 3 ] || usage; check_file "$2" "$3"; exit ;;
+  *) usage ;;
 esac
+[ $# -le 1 ] || usage
 
-exempt() {
-  case "${1##*/}" in
-    Cargo.lock | package-lock.json | npm-shrinkwrap.json | pnpm-lock.yaml | yarn.lock | \
-    bun.lock | bun.lockb | poetry.lock | uv.lock | Pipfile.lock | Gemfile.lock | \
-    composer.lock | go.sum | flake.lock | *.lock) return 0 ;;
-  esac
-  case "$1" in
-    *.png | *.jpg | *.jpeg | *.gif | *.webp | *.ico | *.icns | *.bmp | *.svg | *.pdf | \
-    *.woff | *.woff2 | *.ttf | *.otf | *.mp3 | *.mp4 | *.wav | *.ogg | *.flac | *.webm | \
-    *.onnx | *.bin | *.wasm | *.zip | *.gz | *.tgz | *.xz | *.zst | *.tar | *.min.js | \
-    *.min.css | *.map) return 0 ;;
-  esac
-  # Generated, vendored or binary by .gitattributes.
-  attrs=$(git check-attr linguist-generated linguist-vendored binary diff -- "$1")
-  case "$attrs" in
-    *"linguist-generated: set"* | *"linguist-generated: true"* | \
-    *"linguist-vendored: set"* | *"linguist-vendored: true"* | \
-    *"binary: set"* | *"diff: unset"*) return 0 ;;
-  esac
-  # Binary content: a NUL byte in the first 8 KB, as git itself decides.
-  [ "$(git cat-file blob ":$1" | head -c 8000 | tr -d '\000' | wc -c)" -ne \
-    "$(git cat-file blob ":$1" | head -c 8000 | wc -c)" ]
-}
-
-baseline_size() {
-  [ -f "$BASELINE" ] || return 1
-  awk -v path="$1" '
-    /^[[:space:]]*(#|$)/ { next }
-    { size = $1; sub(/^[^ ]+ /, ""); if ($0 == path) { print size; found = 1; exit } }
-    END { exit found ? 0 : 1 }
-  ' "$BASELINE"
-}
-
-tokens() { echo $(( $1 / 4 )); }
-
-files() {
-  if [ "$mode" = staged ]; then
-    git diff --cached --name-only --diff-filter=ACMR
-  else
-    git ls-files
-  fi
-}
+FILE_SIZE_BASELINE_FILE=$(mktemp)
+export FILE_SIZE_BASELINE_FILE
+trap 'rm -f "$FILE_SIZE_BASELINE_FILE"' EXIT
+if git cat-file -e ":0:$BASELINE" 2>/dev/null; then
+  git show ":0:$BASELINE" >"$FILE_SIZE_BASELINE_FILE" || die "cannot read $BASELINE"
+fi
 
 failed=0
-tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
-files > "$tmp"
-while IFS= read -r path; do
-  [ -n "$path" ] || continue
-  git cat-file -e ":$path" 2>/dev/null || continue
-  size=$(git cat-file -s ":$path")
-  [ "$size" -gt "$MAX_BYTES" ] || continue
-  exempt "$path" && continue
-  if [ "$mode" = list ]; then
-    echo "$size $path"
-    continue
+if [ "$mode" = staged ]; then
+  if git rev-parse --verify --quiet HEAD >/dev/null; then
+    check_against HEAD || failed=1
   fi
-  if allowed=$(baseline_size "$path"); then
-    [ "$size" -le "$allowed" ] && continue
-    echo "file-size: $path grew to $size bytes (~$(tokens "$size") tokens); its baseline is $allowed bytes." >&2
-  else
-    echo "file-size: $path is $size bytes (~$(tokens "$size") tokens), over the $MAX_BYTES-byte (~$(tokens "$MAX_BYTES")-token) cap." >&2
-  fi
-  failed=1
-done < "$tmp"
+  git diff --cached -z --name-only --diff-filter=ACMR |
+    xargs -0 -n 1 "$self" --file "$mode" || failed=1
+else
+  git ls-files -z | xargs -0 -n 1 "$self" --file "$mode" || failed=1
+fi
 
-if [ "$failed" -ne 0 ]; then
+if [ "$failed" -ne 0 ] && [ "$mode" != list ]; then
   cat >&2 <<MSG
 
 Split the file so each part stays under $MAX_BYTES bytes:
   - by responsibility: move each cohesive concern into its own module;
   - move tests into a separate file next to the code they test;
   - extract large data, fixtures or templates into their own files.
-Files in $BASELINE may shrink but not grow. Lockfiles, binary assets, and
-files marked linguist-generated or linguist-vendored in .gitattributes are exempt.
+Files in $BASELINE may shrink but not grow, and its entries may only be
+lowered or removed. Lockfiles, binary content, and paths marked
+linguist-generated, linguist-vendored, binary or -diff in .gitattributes are
+exempt; new exemptions are rejected here and in CI.
 MSG
-  exit 1
 fi
+exit "$failed"
